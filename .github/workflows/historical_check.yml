@@ -1,0 +1,39 @@
+name: Historická kontrola (jednorázová)
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Počet dní zpětně (výchozí: 30)"
+        required: false
+        default: "30"
+
+jobs:
+  historical-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repozitáře
+        uses: actions/checkout@v4
+
+      - name: Nastav Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instaluj závislosti
+        run: pip install requests feedparser
+
+      - name: Spusť historickou kontrolu
+        env:
+          CRYPTOPANIC_API_KEY:   ${{ secrets.CRYPTOPANIC_API_KEY }}
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
+        run: python historical_check.py ${{ github.event.inputs.days }}
+
+      - name: Ulož výsledky jako artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-check-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 30
