@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+*.pyo
+monitor_state.json
+monitor.log
