@@ -21,6 +21,7 @@ from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     COINMARKETCAP_API_KEY,
 )
+from currency_contracts import TOKEN_CONTRACTS
 
 # ── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -215,51 +216,128 @@ def _extract_reason(text: str) -> str:
 
 # ── COINMARKETCAP ─────────────────────────────────────────────────────────────
 
-CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
+CMC_MAP_URL  = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
+CMC_INFO_URL = "https://pro-api.coinmarketcap.com/v2/cryptocurrency/info"
+
+_CMC_HEADERS: dict = {}
+
+
+def _cmc_headers() -> dict:
+    return {"X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY}
+
+
+def _resolve_cmc_id_by_contract(token: str) -> int | None:
+    """
+    Pokusí se najít CMC ID tokenu pomocí contract adresy.
+    Používá /v2/cryptocurrency/info?address=<addr>&network=<platform>.
+    Vrátí první nalezené CMC ID nebo None.
+    """
+    contracts = TOKEN_CONTRACTS.get(token, [])
+    for entry in contracts:
+        platform = entry["platform"]
+        address  = entry["address"]
+        try:
+            resp = requests.get(
+                CMC_INFO_URL,
+                headers=_cmc_headers(),
+                params={"address": address, "network": platform},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                # data is keyed by CMC ID
+                for cmc_id_str, info in data.items():
+                    return int(cmc_id_str)
+        except Exception as e:
+            log.debug("CMC contract lookup failed (%s %s): %s", token, address, e)
+    return None
+
 
 def fetch_coinmarketcap(seen_ids: set) -> list[dict]:
     """
-    Volitelně (pokud je nastaven COINMARKETCAP_API_KEY) zkontroluje,
-    zda jsou sledované tokeny stále aktivní na CoinMarketCap.
+    Zkontroluje, zda jsou sledované tokeny stále aktivní na CoinMarketCap.
+    Pro tokeny se známou contract adresou používá přesné vyhledávání přes adresu,
+    pro ostatní tokeny fallback na symbol matching přes /v1/cryptocurrency/map.
     Upozorní na tokeny označené jako neaktivní (is_active=0).
     """
     if not COINMARKETCAP_API_KEY:
         return []
 
     alerts = []
-    try:
-        resp = requests.get(
-            CMC_URL,
-            headers={"X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY},
-            params={"listing_status": "inactive,untracked", "limit": 5000},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        log.error("CoinMarketCap fetch error: %s", e)
-        return []
 
-    inactive_symbols = {
-        entry["symbol"].upper()
-        for entry in data.get("data", [])
-        if entry.get("is_active") == 0
-    }
+    # --- 1) Tokeny s contract adresou: přesné vyhledávání ---
+    tokens_with_contracts = [t for t in TOKENS if t in TOKEN_CONTRACTS]
+    tokens_without_contracts = [t for t in TOKENS if t not in TOKEN_CONTRACTS]
 
-    for token in TOKENS:
-        if token not in inactive_symbols:
-            continue
-        uid = item_id(f"cmc-inactive-{token}")
-        if uid in seen_ids:
-            continue
-        alerts.append({
-            "source": "CoinMarketCap",
-            "title":  f"{token} označen jako neaktivní na CoinMarketCap",
-            "url":    f"https://coinmarketcap.com/currencies/{token.lower()}/",
-            "tokens": [token],
-            "reason": "delist",
-            "uid":    uid,
-        })
+    log.debug("CMC: %d tokenů s contract adresou, %d bez", len(tokens_with_contracts), len(tokens_without_contracts))
+
+    for token in tokens_with_contracts:
+        try:
+            cmc_id = _resolve_cmc_id_by_contract(token)
+            if cmc_id is None:
+                continue
+            # Fetch status for resolved ID
+            resp = requests.get(
+                CMC_INFO_URL,
+                headers=_cmc_headers(),
+                params={"id": cmc_id},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            info_data = resp.json().get("data", {})
+            for id_str, info in info_data.items():
+                is_active = info.get("is_active", 1)
+                if is_active == 0:
+                    uid = item_id(f"cmc-inactive-contract-{token}")
+                    if uid not in seen_ids:
+                        slug = info.get("slug", token.lower())
+                        alerts.append({
+                            "source": "CoinMarketCap",
+                            "title":  f"{token} označen jako neaktivní na CoinMarketCap (ověřeno přes contract)",
+                            "url":    f"https://coinmarketcap.com/currencies/{slug}/",
+                            "tokens": [token],
+                            "reason": "delist",
+                            "uid":    uid,
+                        })
+        except Exception as e:
+            log.error("CMC info fetch error (%s): %s", token, e)
+        time.sleep(0.2)  # rate limit: free tier = 30 req/min
+
+    # --- 2) Tokeny bez contract adresy: fallback přes symbol map ---
+    if tokens_without_contracts:
+        try:
+            resp = requests.get(
+                CMC_MAP_URL,
+                headers=_cmc_headers(),
+                params={"listing_status": "inactive,untracked", "limit": 5000},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            map_data = resp.json()
+        except Exception as e:
+            log.error("CoinMarketCap map fetch error: %s", e)
+            return alerts
+
+        inactive_symbols = {
+            entry["symbol"].upper()
+            for entry in map_data.get("data", [])
+            if entry.get("is_active") == 0
+        }
+
+        for token in tokens_without_contracts:
+            if token not in inactive_symbols:
+                continue
+            uid = item_id(f"cmc-inactive-{token}")
+            if uid in seen_ids:
+                continue
+            alerts.append({
+                "source": "CoinMarketCap",
+                "title":  f"{token} označen jako neaktivní na CoinMarketCap",
+                "url":    f"https://coinmarketcap.com/currencies/{token.lower()}/",
+                "tokens": [token],
+                "reason": "delist",
+                "uid":    uid,
+            })
 
     return alerts
 

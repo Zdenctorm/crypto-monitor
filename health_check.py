@@ -6,8 +6,13 @@ Spouštěj ručně nebo automaticky před monitorem v GitHub Actions.
 
 Výstup:
   ✅ zdroj OK
-  ❌ zdroj selhal  → workflow skončí s exit code 1
-  ⚠️  zdroj přeskočen (chybí API key – volitelné)
+  ❌ zdroj selhal     → workflow skončí s exit code 1  (povinný zdroj)
+  ⚠️  zdroj selhal    → jen varování, workflow pokračuje (volitelný zdroj)
+  ⚠️  zdroj přeskočen → chybí API key (volitelné)
+
+Volitelné feedy (OPTIONAL_FEEDS) jsou exchange support/announcement centra,
+která mohou občas omezit přístup (rate-limit, Cloudflare). Jejich selhání
+nezablokuje monitor; hlavní feed dané burzy pokrývá stejná oznámení.
 """
 
 import os
@@ -17,6 +22,16 @@ import feedparser
 
 # Přímý import aby health_check fungoval i bez nastavených env vars
 from config import EXCHANGE_FEEDS
+
+# Feedy, které jsou "volitelné" — jejich selhání nevyhodí exit(1).
+# Jsou to převážně kategorie-specifické nebo sekundární support RSS feedy,
+# které mohou mít přísnější rate-limiting nebo Cloudflare ochranu.
+OPTIONAL_FEEDS = {
+    "BinanceDelisting",   # kategorie navId=161 — záloha k hlavnímu Binance feedu
+    "KuCoinAnnouncement", # announcement centrum — záloha k hlavnímu KuCoin feedu
+    "GateAnnouncement",   # gate.com announcement centrum — záloha k Gate feedu
+    "HTX",                # Huobi/HTX — méně kritická burza
+}
 
 CRYPTOPANIC_API_KEY   = os.environ.get("CRYPTOPANIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -120,10 +135,21 @@ def main():
     required_results: list[bool] = []
 
     # ── RSS Exchange feedy ────────────────────────────────────────
-    print("\n📡 RSS Exchange Feedy:")
+    print("\n📡 RSS Exchange Feedy (povinné):")
     for name, url in EXCHANGE_FEEDS.items():
+        if name in OPTIONAL_FEEDS:
+            continue
         ok = check_feed(name, url)
         required_results.append(ok)
+
+    print("\n📡 RSS Exchange Feedy (volitelné — selhání nevyhodí chybu):")
+    for name, url in EXCHANGE_FEEDS.items():
+        if name not in OPTIONAL_FEEDS:
+            continue
+        ok = check_feed(name, url)
+        if not ok:
+            # Jen varování, nepřidáváme do required_results
+            print(f"     ↳ {name} selhal – volitelný feed, monitor pokračuje")
 
     # ── API zdroje ───────────────────────────────────────────────
     print("\n🔑 API Zdroje:")
