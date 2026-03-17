@@ -131,36 +131,67 @@ def fetch_cryptopanic_history() -> list[dict]:
 
 
 def fetch_cmc_inactive() -> list[dict]:
-    """Vrátí tokeny ze sledovaného seznamu aktuálně označené jako neaktivní na CMC."""
+    """Vrátí tokeny ze sledovaného seznamu, které nemají žádnou aktivní položku na CMC.
+
+    Ticker symbol může sdílet více různých coinů (aktivních i neaktivních).
+    Token hlásíme jako neaktivní pouze tehdy, pokud pro daný symbol neexistuje
+    žádná aktivní položka – tj. i původně sledovaný coin byl delistován.
+    """
     if not CMC_KEY:
         print("  ⚠️  COINMARKETCAP_API_KEY není nastaven – přeskočeno")
         return []
 
-    try:
-        resp = requests.get(
-            "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map",
-            headers={"X-CMC_PRO_API_KEY": CMC_KEY},
-            params={"listing_status": "inactive,untracked", "limit": 5000},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        print(f"  ❌ CoinMarketCap chyba: {e}")
-        return []
+    def fetch_map(listing_status: str) -> list[dict]:
+        results = []
+        start = 1
+        limit = 5000
+        while True:
+            try:
+                resp = requests.get(
+                    "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map",
+                    headers={"X-CMC_PRO_API_KEY": CMC_KEY},
+                    params={"listing_status": listing_status, "limit": limit, "start": start},
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as e:
+                print(f"  ❌ CoinMarketCap chyba ({listing_status}, start={start}): {e}")
+                break
+            page = data.get("data", [])
+            results.extend(page)
+            if len(page) < limit:
+                break
+            start += limit
+        return results
+
+    # Symboly, které mají alespoň jednu aktivní položku na CMC
+    active_symbols: set[str] = set()
+    for entry in fetch_map("active"):
+        sym = entry.get("symbol", "").upper()
+        if sym in TOKENS_SET:
+            active_symbols.add(sym)
+
+    # Neaktivní / untracked položky – zajímají nás jen ty, jejichž symbol
+    # VŮBEC nemá aktivní protějšek (jinak jde o starý coin se stejným tickerem)
+    seen_inactive: dict[str, dict] = {}
+    for entry in fetch_map("inactive,untracked"):
+        sym = entry.get("symbol", "").upper()
+        if sym not in TOKENS_SET or sym in active_symbols:
+            continue
+        if sym not in seen_inactive:
+            seen_inactive[sym] = entry
 
     inactive = []
-    for entry in data.get("data", []):
-        sym = entry.get("symbol", "").upper()
-        if sym in TOKENS_SET and entry.get("is_active") == 0:
-            inactive.append({
-                "date":   "aktuální stav",
-                "source": "CoinMarketCap",
-                "tokens": [sym],
-                "reason": "inactive/delist",
-                "title":  f"{sym} – označen jako neaktivní na CoinMarketCap",
-                "url":    f"https://coinmarketcap.com/currencies/{entry.get('slug', sym.lower())}/",
-            })
+    for sym, entry in seen_inactive.items():
+        inactive.append({
+            "date":   "aktuální stav",
+            "source": "CoinMarketCap",
+            "tokens": [sym],
+            "reason": "inactive/delist",
+            "title":  f"{sym} – žádná aktivní položka na CoinMarketCap",
+            "url":    f"https://coinmarketcap.com/currencies/{entry.get('slug', sym.lower())}/",
+        })
     return inactive
 
 
