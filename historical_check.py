@@ -16,7 +16,7 @@ import os
 import requests
 from datetime import datetime, timezone, timedelta
 
-from config import TOKENS, KEYWORDS, COINMARKETCAP_API_KEY
+from config import TOKENS, KEYWORDS, COINMARKETCAP_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
 CMC_KEY             = os.environ.get("COINMARKETCAP_API_KEY", COINMARKETCAP_API_KEY)
@@ -25,6 +25,26 @@ DAYS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 SINCE = datetime.now(timezone.utc) - timedelta(days=DAYS)
 
 TOKENS_SET = set(TOKENS)
+
+
+def send_telegram(text: str):
+    """Pošle zprávu přes Telegram Bot API."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("  ⚠️  TELEGRAM_BOT_TOKEN nebo TELEGRAM_CHAT_ID není nastaven – přeskočeno")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        resp.raise_for_status()
+        print("  ✅ Zpráva odeslána do Telegramu")
+    except Exception as e:
+        print(f"  ❌ Telegram chyba: {e}")
 
 
 def contains_keyword(text: str) -> bool:
@@ -242,6 +262,32 @@ def main():
     print("=" * 65)
     print_results(all_results)
     print("=" * 65)
+
+    # ── Telegram notifikace ──────────────────────────────────────────────────
+    print("\n📨 Odesílám výsledky do Telegramu...")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if not all_results:
+        send_telegram(
+            f"✅ <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
+            "Žádné záznamy o migracích/delistinzích nenalezeny."
+        )
+    else:
+        # Úvodní zpráva se souhrnem
+        send_telegram(
+            f"🔍 <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
+            f"Nalezeno <b>{len(all_results)}</b> záznamů. Posílám detaily..."
+        )
+        # Každý záznam jako samostatná zpráva (Telegram limit 4096 znaků)
+        for r in sorted(all_results, key=lambda x: x["date"], reverse=True):
+            tokens_str = ", ".join(r["tokens"]) if r["tokens"] else "GENERAL"
+            msg = (
+                f"🚨 <b>[{tokens_str}]</b> – {r['reason']}\n"
+                f"📅 {r['date']} | {r['source']}\n"
+                f"{r['title'][:200]}\n"
+                f"{r['url']}"
+            )
+            send_telegram(msg)
+            time.sleep(0.3)  # rate limit
 
 
 if __name__ == "__main__":
