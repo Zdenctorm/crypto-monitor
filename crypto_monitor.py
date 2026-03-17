@@ -98,7 +98,7 @@ def send_telegram(text: str):
 
 # ── CRYPTOPANIC ───────────────────────────────────────────────────────────────
 
-CRYPTOPANIC_URL = "https://cryptopanic.com/api/free/v1/posts/"
+CRYPTOPANIC_URL = "https://cryptopanic.com/api/developer/v2/posts/"
 
 def fetch_cryptopanic(seen_ids: set) -> list[dict]:
     """
