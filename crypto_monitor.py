@@ -19,6 +19,7 @@ from config import (
     CRYPTOPANIC_API_KEY, TOKENS, KEYWORDS,
     EXCHANGE_FEEDS, STATE_FILE, LOG_FILE,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+    COINMARKETCAP_API_KEY,
 )
 
 # ── LOGGING ──────────────────────────────────────────────────────────────────
@@ -212,6 +213,57 @@ def _extract_reason(text: str) -> str:
     return "unknown"
 
 
+# ── COINMARKETCAP ─────────────────────────────────────────────────────────────
+
+CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
+
+def fetch_coinmarketcap(seen_ids: set) -> list[dict]:
+    """
+    Volitelně (pokud je nastaven COINMARKETCAP_API_KEY) zkontroluje,
+    zda jsou sledované tokeny stále aktivní na CoinMarketCap.
+    Upozorní na tokeny označené jako neaktivní (is_active=0).
+    """
+    if not COINMARKETCAP_API_KEY:
+        return []
+
+    alerts = []
+    try:
+        resp = requests.get(
+            CMC_URL,
+            headers={"X-CMC_PRO_API_KEY": COINMARKETCAP_API_KEY},
+            params={"listing_status": "inactive,untracked", "limit": 5000},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("CoinMarketCap fetch error: %s", e)
+        return []
+
+    inactive_symbols = {
+        entry["symbol"].upper()
+        for entry in data.get("data", [])
+        if entry.get("is_active") == 0
+    }
+
+    for token in TOKENS:
+        if token not in inactive_symbols:
+            continue
+        uid = item_id(f"cmc-inactive-{token}")
+        if uid in seen_ids:
+            continue
+        alerts.append({
+            "source": "CoinMarketCap",
+            "title":  f"{token} označen jako neaktivní na CoinMarketCap",
+            "url":    f"https://coinmarketcap.com/currencies/{token.lower()}/",
+            "tokens": [token],
+            "reason": "delist",
+            "uid":    uid,
+        })
+
+    return alerts
+
+
 # ── DAILY SUMMARY ─────────────────────────────────────────────────────────────
 
 def log_summary(all_alerts: list[dict]):
@@ -261,6 +313,15 @@ def main():
     ex_alerts = fetch_exchange_feeds(seen_ids)
     log.info("  → %d nových alertů z exchange feedů", len(ex_alerts))
     all_alerts.extend(ex_alerts)
+
+    # 3) CoinMarketCap (volitelné)
+    if COINMARKETCAP_API_KEY:
+        log.info("Fetching CoinMarketCap inactive tokens...")
+        cmc_alerts = fetch_coinmarketcap(seen_ids)
+        log.info("  → %d nových alertů z CoinMarketCap", len(cmc_alerts))
+        all_alerts.extend(cmc_alerts)
+    else:
+        log.info("CoinMarketCap přeskočen (API key není nastaven)")
 
     # Logovat každý alert individuálně + poslat na Telegram
     for a in all_alerts:
