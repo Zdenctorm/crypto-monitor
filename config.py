@@ -54,15 +54,19 @@ KEYWORDS = [
 ]
 
 # Exchange announcement feed URLs
+# NOTE: Kraken posts token migrations/delistings in their Support Center, NOT on the blog.
+# Example missed: https://support.kraken.com/articles/mantra-om-migration (OM→MANTRA, Feb 2026)
+# Both feeds must be monitored to catch all relevant events.
 EXCHANGE_FEEDS = {
-    "Kraken":     "https://blog.kraken.com/feed",
-    "Coinbase":   "https://www.coinbase.com/blog/landing/rss",
-    "Binance":    "https://www.binance.com/en/support/announcement/rss",
-    "OKX":        "https://www.okx.com/help-center/rss",
-    "Bybit":      "https://announcements.bybit.com/en-US/rss/",
-    "CryptoCom":  "https://crypto.com/en/feed/rss",
-    "KuCoin":     "https://www.kucoin.com/news/rss",
-    "Gate":       "https://www.gate.io/article/rss",
+    "Kraken":        "https://blog.kraken.com/feed",
+    "KrakenSupport": "https://support.kraken.com/hc/en-us/categories/200187583-Announcements/articles.rss",
+    "Coinbase":      "https://www.coinbase.com/blog/landing/rss",
+    "Binance":       "https://www.binance.com/en/support/announcement/rss",
+    "OKX":           "https://www.okx.com/help-center/rss",
+    "Bybit":         "https://announcements.bybit.com/en-US/rss/",
+    "CryptoCom":     "https://crypto.com/en/feed/rss",
+    "KuCoin":        "https://www.kucoin.com/news/rss",
+    "Gate":          "https://www.gate.io/article/rss",
 }
 
 # CoinMarketCap API key (volitelné – free tier stačí)
