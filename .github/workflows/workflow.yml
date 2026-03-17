@@ -21,12 +21,36 @@ jobs:
       - name: Instaluj závislosti
         run: pip install requests feedparser
 
+      - name: Obnov stav monitoru z cache
+        uses: actions/cache/restore@v4
+        with:
+          path: monitor_state.json
+          key: monitor-state-${{ github.run_id }}
+          restore-keys: |
+            monitor-state-
+
+      - name: Health check – ověř dostupnost zdrojů
+        env:
+          CRYPTOPANIC_API_KEY: ${{ secrets.CRYPTOPANIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
+        run: python health_check.py
+
       - name: Spusť monitor
         env:
           CRYPTOPANIC_API_KEY: ${{ secrets.CRYPTOPANIC_API_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
         run: python crypto_monitor.py
+
+      - name: Ulož stav monitoru do cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: monitor_state.json
+          key: monitor-state-${{ github.run_id }}
 
       - name: Ulož log jako artifact
         if: always()

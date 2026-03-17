@@ -55,11 +55,18 @@ KEYWORDS = [
 
 # Exchange announcement feed URLs
 EXCHANGE_FEEDS = {
-    "Kraken":   "https://blog.kraken.com/feed",
-    "Coinbase": "https://www.coinbase.com/blog/landing/rss",
-    "Binance":  "https://www.binance.com/en/support/announcement/rss",
-    "OKX":      "https://www.okx.com/help-center/rss",
+    "Kraken":     "https://blog.kraken.com/feed",
+    "Coinbase":   "https://www.coinbase.com/blog/landing/rss",
+    "Binance":    "https://www.binance.com/en/support/announcement/rss",
+    "OKX":        "https://www.okx.com/help-center/rss",
+    "Bybit":      "https://announcements.bybit.com/en-US/rss/",
+    "CryptoCom":  "https://crypto.com/en/feed/rss",
+    "KuCoin":     "https://www.kucoin.com/news/rss",
+    "Gate":       "https://www.gate.io/article/rss",
 }
+
+# CoinMarketCap API key (volitelné – free tier stačí)
+COINMARKETCAP_API_KEY = os.environ.get("COINMARKETCAP_API_KEY", "")
 
 # Kde ukládat stav a logy
 STATE_FILE = "monitor_state.json"
