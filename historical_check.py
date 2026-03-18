@@ -130,6 +130,10 @@ def fetch_exchange_feeds_history() -> list[dict]:
             date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
             tokens_found = find_tokens(full)
 
+            # Přeskočíme články bez konkrétního tokenu ze sledovaného seznamu
+            if not tokens_found:
+                continue
+
             results.append({
                 "date":   date_str,
                 "source": exchange,
@@ -208,6 +212,10 @@ def fetch_cryptopanic_history() -> list[dict]:
                     sym = c.get("code", "")
                     if sym in TOKENS_SET:
                         found_tokens.append(sym)
+
+            # Přeskočíme zprávy bez konkrétního tokenu ze sledovaného seznamu
+            if not found_tokens:
+                continue
 
             results.append({
                 "date":   pub.strftime("%Y-%m-%d"),

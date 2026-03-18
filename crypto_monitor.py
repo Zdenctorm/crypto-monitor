@@ -191,8 +191,10 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
             tokens_found = token_in_text(full)
 
-            # Pokud jsme nenašli žádný token ale article vypadá globálně důležitý
-            # (např. "All ERC-20 tokens migration") — přidáme s tokens=[]
+            # Přeskočíme články bez konkrétního tokenu ze sledovaného seznamu
+            if not tokens_found:
+                continue
+
             alerts.append({
                 "source":  exchange,
                 "title":   title,
