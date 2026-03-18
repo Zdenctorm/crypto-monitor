@@ -37,7 +37,7 @@ COINMARKETCAP_API_KEY = os.environ.get("COINMARKETCAP_API_KEY", "")
 
 def check_feed(name: str, url: str) -> bool:
     try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"})
+        resp = requests.get(url, timeout=15, headers=BROWSER_HEADERS)
         resp.raise_for_status()
         feed = feedparser.parse(resp.text)
         entry_count = len(feed.entries)
@@ -58,6 +58,113 @@ def check_feed(name: str, url: str) -> bool:
         return False
     except Exception as e:
         print(f"  ❌ {name}: {e}")
+        return False
+
+
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+JSON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
+def check_binance_api() -> bool:
+    """Ověří Binance BAPI endpoint (náhrada za RSS, které vrací 0 položek)."""
+    try:
+        resp = requests.get(
+            "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
+            params={"catalogId": "161", "pageNo": 1, "pageSize": 5},
+            headers={**JSON_HEADERS, "Referer": "https://www.binance.com/"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count = len(data.get("data", {}).get("articles", []))
+        total = data.get("data", {}).get("total", "?")
+        print(f"  ✅ Binance BAPI: OK ({total} oznámení celkem, {count} v odpovědi)")
+        return True
+    except requests.exceptions.HTTPError as e:
+        print(f"  ❌ Binance BAPI: HTTP {e.response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  ❌ Binance BAPI: {e}")
+        return False
+
+
+def check_okx_api() -> bool:
+    """Ověří OKX API v5 announcements endpoint."""
+    try:
+        resp = requests.get(
+            "https://www.okx.com/api/v5/support/announcements",
+            params={"lang": "en-US", "limit": "5"},
+            headers=JSON_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = data.get("data", {})
+        if isinstance(items, dict):
+            items = items.get("list", [])
+        count = len(items) if isinstance(items, list) else "?"
+        print(f"  ✅ OKX API: OK ({count} oznámení v odpovědi)")
+        return True
+    except requests.exceptions.HTTPError as e:
+        print(f"  ❌ OKX API: HTTP {e.response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  ❌ OKX API: {e}")
+        return False
+
+
+def check_kraken_support() -> bool:
+    """Ověří Kraken Support Center přes Zendesk Help Center API."""
+    try:
+        resp = requests.get(
+            "https://support.kraken.com/api/v2/help_center/en-us/articles.json",
+            params={"category_id": "200187583", "per_page": 5, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count = len(data.get("articles", []))
+        total = data.get("count", "?")
+        print(f"  ✅ KrakenSupport (Zendesk API): OK ({total} článků, {count} v odpovědi)")
+        return True
+    except requests.exceptions.HTTPError as e:
+        print(f"  ❌ KrakenSupport (Zendesk API): HTTP {e.response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  ❌ KrakenSupport (Zendesk API): {e}")
+        return False
+
+
+def check_htx_api() -> bool:
+    """Ověří HTX (Huobi) přes Zendesk Help Center API."""
+    try:
+        resp = requests.get(
+            "https://support.htx.com/api/v2/help_center/en-us/articles.json",
+            params={"per_page": 5, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count = len(data.get("articles", []))
+        total = data.get("count", "?")
+        print(f"  ✅ HTX (Zendesk API): OK ({total} článků, {count} v odpovědi)")
+        return True
+    except requests.exceptions.HTTPError as e:
+        print(f"  ❌ HTX (Zendesk API): HTTP {e.response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  ❌ HTX (Zendesk API): {e}")
         return False
 
 
@@ -194,17 +301,26 @@ def main():
             print(f"     ↳ {name} selhal – volitelný feed, monitor pokračuje")
             failed_names.append(f"{name} (volitelný)")
 
-    # ── API zdroje ───────────────────────────────────────────────
-    print("\n🔑 API Zdroje:")
+    # ── Exchange API zdroje (burzy bez funkčního RSS) ────────────────────────
+    print("\n🔌 Exchange API zdroje (náhrada za blokované RSS):")
+    for name, check_fn in [
+        ("Binance BAPI",             check_binance_api),
+        ("OKX API v5",               check_okx_api),
+        ("KrakenSupport Zendesk API",check_kraken_support),
+        ("HTX Zendesk API",          check_htx_api),
+        ("Bybit V5 API",             check_bybit_api),
+    ]:
+        ok = check_fn()
+        required_results.append(ok)
+        if not ok:
+            failed_names.append(name)
+
+    # ── Ostatní API ──────────────────────────────────────────────
+    print("\n🔑 Ostatní API:")
     cp_ok = check_cryptopanic()
     required_results.append(cp_ok)
     if not cp_ok:
         failed_names.append("CryptoPanic API")
-
-    bybit_ok = check_bybit_api()
-    required_results.append(bybit_ok)
-    if not bybit_ok:
-        failed_names.append("Bybit API")
 
     check_coinmarketcap()   # volitelné, neblokuje workflow
 

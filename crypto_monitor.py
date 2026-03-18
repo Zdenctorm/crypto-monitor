@@ -57,6 +57,22 @@ def item_id(text: str) -> str:
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
+# Hlavičky simulující prohlížeč — pomáhají obejít Cloudflare bot detekci
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+
+# Hlavičky pro JSON API volání
+JSON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
+
 def contains_keyword(text: str) -> bool:
     t = text.lower()
     return any(kw in t for kw in KEYWORDS)
@@ -171,10 +187,7 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(
-                feed_url,
-                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
-            )
+            feed = feedparser.parse(feed_url, request_headers=BROWSER_HEADERS)
         except Exception as e:
             log.error("Feed parse error (%s): %s", exchange, e)
             continue
@@ -217,6 +230,214 @@ def _extract_reason(text: str) -> str:
         if kw in t:
             return kw
     return "unknown"
+
+
+# ── BINANCE API ───────────────────────────────────────────────────────────────
+
+def fetch_binance_api(seen_ids: set) -> list[dict]:
+    """
+    Stahuje oznámení z Binance přes interní CMS API (BAPI).
+    RSS feed vrací 0 položek (Cloudflare soft-block), BAPI funguje bez omezení.
+    catalogId=161 odpovídá sekci Delistings v announcement centru.
+    """
+    alerts = []
+    BAPI_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    headers = {**JSON_HEADERS, "Referer": "https://www.binance.com/"}
+
+    # Dotazujeme dvě kategorie: delistingy (161) + obecná oznámení (všechny)
+    queries = [
+        {"catalogId": "161", "pageNo": 1, "pageSize": 50},  # delistingy
+        {"type": "1",        "pageNo": 1, "pageSize": 50},  # všechna oznámení
+    ]
+    seen_in_batch: set[str] = set()
+
+    for params in queries:
+        try:
+            resp = requests.get(BAPI_URL, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            log.error("Binance BAPI fetch error (%s): %s", params, e)
+            continue
+
+        for article in data.get("data", {}).get("articles", []):
+            code  = article.get("code", "")
+            title = article.get("title", "")
+            url   = f"https://www.binance.com/en/support/announcement/{code}" if code else ""
+            uid   = item_id(url or title)
+
+            if uid in seen_ids or uid in seen_in_batch:
+                continue
+            seen_in_batch.add(uid)
+
+            if not contains_keyword(title):
+                continue
+
+            tokens_found = token_in_text(title)
+            if not tokens_found:
+                continue
+
+            alerts.append({
+                "source":  "Binance",
+                "title":   title,
+                "url":     url,
+                "tokens":  tokens_found,
+                "reason":  _extract_reason(title),
+                "uid":     uid,
+            })
+
+    return alerts
+
+
+# ── OKX API ───────────────────────────────────────────────────────────────────
+
+def fetch_okx_api(seen_ids: set) -> list[dict]:
+    """
+    Stahuje oznámení z OKX přes API v5.
+    OKX help-center RSS neexistuje (404); API v5 endpoint je veřejný a bez autentizace.
+    """
+    alerts = []
+    OKX_URL = "https://www.okx.com/api/v5/support/announcements"
+    try:
+        resp = requests.get(
+            OKX_URL,
+            params={"lang": "en-US", "limit": "50"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("OKX API fetch error: %s", e)
+        return alerts
+
+    for item in data.get("data", {}).get("list", []) or data.get("data", []) or []:
+        title = item.get("title", "")
+        url   = item.get("url", "") or item.get("announcementUrl", "")
+        ts    = item.get("pTime", "") or item.get("announcementPTime", "") or item.get("businessPTime", "")
+        full  = f"{title}"
+        uid   = item_id(url or title)
+
+        if uid in seen_ids:
+            continue
+        if not contains_keyword(full):
+            continue
+
+        tokens_found = token_in_text(full)
+        if not tokens_found:
+            continue
+
+        alerts.append({
+            "source":  "OKX",
+            "title":   title,
+            "url":     url,
+            "tokens":  tokens_found,
+            "reason":  _extract_reason(full),
+            "uid":     uid,
+        })
+
+    return alerts
+
+
+# ── KRAKEN SUPPORT (Zendesk API) ───────────────────────────────────────────────
+
+def fetch_kraken_support(seen_ids: set) -> list[dict]:
+    """
+    Stahuje oznámení z Kraken Support Centre přes Zendesk Help Center API.
+    RSS category feed vrací 403; Zendesk API je veřejné pro neautentizované čtení.
+    category_id=200187583 = sekce Announcements.
+    KRITICKÉ: OM→MANTRA migrace (únor 2026) byla VÝHRADNĚ v tomto zdroji.
+    """
+    alerts = []
+    ZENDESK_URL = "https://support.kraken.com/api/v2/help_center/en-us/articles.json"
+    try:
+        resp = requests.get(
+            ZENDESK_URL,
+            params={"category_id": "200187583", "per_page": 50, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("KrakenSupport Zendesk API fetch error: %s", e)
+        return alerts
+
+    for article in data.get("articles", []):
+        title    = article.get("title", "")
+        url      = article.get("html_url", "")
+        body     = article.get("body", "")
+        full     = f"{title} {body}"
+        uid      = item_id(url or title)
+
+        if uid in seen_ids:
+            continue
+        if not contains_keyword(full):
+            continue
+
+        tokens_found = token_in_text(full)
+        if not tokens_found:
+            continue
+
+        alerts.append({
+            "source":  "KrakenSupport",
+            "title":   title,
+            "url":     url,
+            "tokens":  tokens_found,
+            "reason":  _extract_reason(full),
+            "uid":     uid,
+        })
+
+    return alerts
+
+
+# ── HTX API (Zendesk) ─────────────────────────────────────────────────────────
+
+def fetch_htx_api(seen_ids: set) -> list[dict]:
+    """
+    Stahuje oznámení z HTX (Huobi) přes Zendesk Help Center API.
+    RSS endpoint vrací 403. HTX používá Zendesk na support.htx.com.
+    """
+    alerts = []
+    ZENDESK_URL = "https://support.htx.com/api/v2/help_center/en-us/articles.json"
+    try:
+        resp = requests.get(
+            ZENDESK_URL,
+            params={"per_page": 50, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("HTX Zendesk API fetch error: %s", e)
+        return alerts
+
+    for article in data.get("articles", []):
+        title    = article.get("title", "")
+        url      = article.get("html_url", "")
+        full     = title
+        uid      = item_id(url or title)
+
+        if uid in seen_ids:
+            continue
+        if not contains_keyword(full):
+            continue
+
+        tokens_found = token_in_text(full)
+        if not tokens_found:
+            continue
+
+        alerts.append({
+            "source":  "HTX",
+            "title":   title,
+            "url":     url,
+            "tokens":  tokens_found,
+            "reason":  _extract_reason(full),
+            "uid":     uid,
+        })
+
+    return alerts
 
 
 # ── BYBIT API ─────────────────────────────────────────────────────────────────
@@ -444,14 +665,34 @@ def main():
     log.info("  → %d nových alertů z CryptoPanic", len(cp_alerts))
     all_alerts.extend(cp_alerts)
 
-    # 2) Exchange RSS feeds
-    log.info("Fetching exchange feeds...")
+    # 2) Exchange RSS feeds (Kraken, Coinbase, KuCoin, Gate.io)
+    log.info("Fetching exchange RSS feeds...")
     ex_alerts = fetch_exchange_feeds(seen_ids)
-    log.info("  → %d nových alertů z exchange feedů", len(ex_alerts))
+    log.info("  → %d nových alertů z RSS feedů", len(ex_alerts))
     all_alerts.extend(ex_alerts)
 
-    # 3) Bybit API (RSS není dostupné, používáme oficální JSON API)
-    log.info("Fetching Bybit announcements (API)...")
+    # 3) Exchange API feeds (burzy bez funkčního RSS)
+    log.info("Fetching Binance announcements (BAPI)...")
+    binance_alerts = fetch_binance_api(seen_ids)
+    log.info("  → %d nových alertů z Binance", len(binance_alerts))
+    all_alerts.extend(binance_alerts)
+
+    log.info("Fetching OKX announcements (API v5)...")
+    okx_alerts = fetch_okx_api(seen_ids)
+    log.info("  → %d nových alertů z OKX", len(okx_alerts))
+    all_alerts.extend(okx_alerts)
+
+    log.info("Fetching KrakenSupport announcements (Zendesk API)...")
+    kraken_support_alerts = fetch_kraken_support(seen_ids)
+    log.info("  → %d nových alertů z KrakenSupport", len(kraken_support_alerts))
+    all_alerts.extend(kraken_support_alerts)
+
+    log.info("Fetching HTX announcements (Zendesk API)...")
+    htx_alerts = fetch_htx_api(seen_ids)
+    log.info("  → %d nových alertů z HTX", len(htx_alerts))
+    all_alerts.extend(htx_alerts)
+
+    log.info("Fetching Bybit announcements (V5 API)...")
     bybit_alerts = fetch_bybit(seen_ids)
     log.info("  → %d nových alertů z Bybit", len(bybit_alerts))
     all_alerts.extend(bybit_alerts)

@@ -62,42 +62,43 @@ KEYWORDS = [
     "maintenance",
 ]
 
-# Exchange announcement feed URLs
+# ── RSS FEEDY (EXCHANGE_FEEDS) ────────────────────────────────────────────────
 #
-# STRATEGIE: RSS feedy + JSON API pro burzy bez RSS.
-# Delistingy a migrace jsou VŽDY v announcement centru.
+# Pouze ověřené funkční RSS feedy.
+# Burzy BEZ RSS mají vlastní fetch funkce v crypto_monitor.py:
+#   fetch_binance_api()      → Binance BAPI (RSS vrací 0 položek)
+#   fetch_okx_api()          → OKX API v5  (RSS neexistuje)
+#   fetch_kraken_support()   → Zendesk API (RSS blokováno)
+#   fetch_bybit()            → Bybit V5 API (RSS blokováno)
+#   fetch_htx_api()          → HTX Zendesk API (RSS blokováno)
 #
-# Výsledky health checku (2026-03-18):
-#   Kraken blog     ✅ RSS funguje (10 položek)
-#   KrakenSupport   ❌ 403 — Zendesk blokuje category RSS; sekce RSS zatím nenalezena
-#                      POZOR: OM→MANTRA migrace (únor 2026) byla POUZE zde. Nutno sledovat!
-#   Coinbase        ❌ 403 — blokováno, bez alternativy
-#   Binance         ⚠️  RSS vrací 0 položek (možný soft-block / Cloudflare)
-#   OKX             ❌ 404 — help-center/rss neexistuje, OKX nemá veřejné RSS
-#   Bybit           ❌ RSS 403, ale má OFICIÁLNÍ JSON API → fetch_bybit() v crypto_monitor.py
-#   Crypto.com      ❌ 404 — neexistuje
+# Výsledky health checku (2026-03-18) + stav po opravách:
+#   Kraken blog     ✅ RSS funguje
+#   KrakenSupport   → fetch_kraken_support() přes Zendesk API
+#   Coinbase        → blog.coinbase.com/feed (Medium RSS, zkouší se s browser headers)
+#   Binance         → fetch_binance_api() přes BAPI
+#   OKX             → fetch_okx_api() přes API v5
+#   Bybit           → fetch_bybit() přes V5 API  [již implementováno]
 #   KuCoin news     ✅ RSS funguje (50 položek)
-#   KuCoinAnnounce  ❌ 404 — endpoint neexistuje
-#   Gate.io         ❌ malformed XML (Cloudflare challenge page)
-#   GateAnnounce    ❌ malformed XML (Cloudflare challenge page)
-#   HTX (Huobi)     ❌ 403 — blokováno
+#   Gate.io         → RSS s browser headers (zkouší se)
+#   HTX (Huobi)     → fetch_htx_api() přes Zendesk API
 
 EXCHANGE_FEEDS = {
-    # ── Kraken ───────────────────────────────────────────────────────────────
-    # Blog pokrývá obecné zprávy; support centrum je KRITICKÉ pro delistingy/migrace
-    # ale category RSS vrací 403. Pokud najdeš sekci RSS, přidej KrakenSupport zpět.
-    # Postup: najdi section ID na support.kraken.com/hc/en-us/categories/200187583
-    # a zkus: https://support.kraken.com/hc/en-us/sections/{SECTION_ID}/articles.rss
-    "Kraken":               "https://blog.kraken.com/feed",
+    # ── Kraken blog ───────────────────────────────────────────────────────────
+    "Kraken":       "https://blog.kraken.com/feed",
 
-    # ── Binance ──────────────────────────────────────────────────────────────
-    # Vrací 0 položek — možný Cloudflare soft-block. Zachováváme, monitorujeme.
-    "Binance":              "https://www.binance.com/en/support/announcement/rss",
-    "BinanceDelisting":     "https://www.binance.com/en/support/announcement/rss?navId=161",
+    # ── Coinbase blog (Medium RSS) ────────────────────────────────────────────
+    # blog.coinbase.com je Medium publikace → standard RSS feed.
+    # Může selhat za Cloudflare — fetch_exchange_feeds() zkouší s browser headers.
+    "Coinbase":     "https://blog.coinbase.com/feed",
 
-    # ── KuCoin ───────────────────────────────────────────────────────────────
-    # Pouze news RSS funguje; announcement endpoint (rss/announcement) vrací 404.
-    "KuCoin":               "https://www.kucoin.com/rss/news?lang=en_US",
+    # ── KuCoin news ───────────────────────────────────────────────────────────
+    "KuCoin":       "https://www.kucoin.com/rss/news?lang=en_US",
+
+    # ── Gate.io ───────────────────────────────────────────────────────────────
+    # RSS existuje ale při předchozím testu vrátilo malformed XML (Cloudflare).
+    # Zkouší se s plnými browser headers — může fungovat z GitHub Actions.
+    "Gate":         "https://www.gate.io/article/rss",
 }
 
 # CoinMarketCap API key (volitelné – free tier stačí)

@@ -25,6 +25,18 @@ from datetime import datetime, timezone, timedelta
 
 from config import TOKENS, KEYWORDS, EXCHANGE_FEEDS, COINMARKETCAP_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+JSON_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
 CMC_KEY             = os.environ.get("COINMARKETCAP_API_KEY", COINMARKETCAP_API_KEY)
 
@@ -93,10 +105,7 @@ def fetch_exchange_feeds_history() -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(
-                feed_url,
-                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
-            )
+            feed = feedparser.parse(feed_url, request_headers=BROWSER_HEADERS)
         except Exception as e:
             print(f"    ⚠️  {exchange}: chyba parsování ({e})")
             continue
@@ -240,6 +249,184 @@ def fetch_cryptopanic_history() -> list[dict]:
         print(f"  → zpracována strana {page}, nalezeno {len(results)} záznamů zatím...")
         time.sleep(1)
 
+    return results
+
+
+# ── 2b) EXCHANGE API ZDROJE (burzy bez funkčního RSS) ─────────────────────────
+
+def fetch_binance_api_history() -> list[dict]:
+    """Stahuje oznámení z Binance přes BAPI (catalogId=161 = delistingy)."""
+    results = []
+    BAPI_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
+    headers = {**JSON_HEADERS, "Referer": "https://www.binance.com/"}
+    seen_codes: set[str] = set()
+
+    for params in [
+        {"catalogId": "161", "pageNo": 1, "pageSize": 50},
+        {"type": "1",        "pageNo": 1, "pageSize": 50},
+    ]:
+        try:
+            resp = requests.get(BAPI_URL, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  ❌ Binance BAPI chyba: {e}")
+            continue
+
+        for article in data.get("data", {}).get("articles", []):
+            code  = article.get("code", "")
+            title = article.get("title", "")
+            ts_ms = article.get("releaseDate", 0)
+            url   = f"https://www.binance.com/en/support/announcement/{code}" if code else ""
+
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+
+            try:
+                pub_date = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
+            except Exception:
+                pub_date = None
+
+            if pub_date and pub_date < SINCE:
+                continue
+
+            if not contains_keyword(title):
+                continue
+
+            tokens_found = find_tokens(title)
+            if not tokens_found:
+                continue
+
+            date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+            results.append({"date": date_str, "source": "Binance", "tokens": tokens_found,
+                             "reason": first_keyword(title), "title": title, "url": url})
+
+    return results
+
+
+def fetch_okx_api_history() -> list[dict]:
+    """Stahuje oznámení z OKX přes API v5."""
+    results = []
+    try:
+        resp = requests.get(
+            "https://www.okx.com/api/v5/support/announcements",
+            params={"lang": "en-US", "limit": "50"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  ❌ OKX API chyba: {e}")
+        return results
+
+    items = data.get("data", {})
+    if isinstance(items, dict):
+        items = items.get("list", [])
+    if not isinstance(items, list):
+        items = []
+
+    for item in items:
+        title = item.get("title", "")
+        url   = item.get("url", "") or item.get("announcementUrl", "")
+        ts    = item.get("pTime", "") or item.get("announcementPTime", "") or item.get("businessPTime", "")
+        try:
+            pub_date = datetime.fromtimestamp(int(ts) / 1000, tz=timezone.utc) if ts else None
+        except Exception:
+            pub_date = None
+
+        if pub_date and pub_date < SINCE:
+            continue
+        if not contains_keyword(title):
+            continue
+        tokens_found = find_tokens(title)
+        if not tokens_found:
+            continue
+
+        date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+        results.append({"date": date_str, "source": "OKX", "tokens": tokens_found,
+                         "reason": first_keyword(title), "title": title, "url": url})
+    return results
+
+
+def fetch_kraken_support_history() -> list[dict]:
+    """Stahuje oznámení z Kraken Support Centre přes Zendesk API."""
+    results = []
+    try:
+        resp = requests.get(
+            "https://support.kraken.com/api/v2/help_center/en-us/articles.json",
+            params={"category_id": "200187583", "per_page": 50, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  ❌ KrakenSupport Zendesk API chyba: {e}")
+        return results
+
+    for article in data.get("articles", []):
+        title    = article.get("title", "")
+        url      = article.get("html_url", "")
+        body     = article.get("body", "")
+        created  = article.get("created_at", "")
+        full     = f"{title} {body}"
+        try:
+            pub_date = datetime.fromisoformat(created.replace("Z", "+00:00")) if created else None
+        except Exception:
+            pub_date = None
+
+        if pub_date and pub_date < SINCE:
+            continue
+        if not contains_keyword(full):
+            continue
+        tokens_found = find_tokens(full)
+        if not tokens_found:
+            continue
+
+        date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+        results.append({"date": date_str, "source": "KrakenSupport", "tokens": tokens_found,
+                         "reason": first_keyword(full), "title": title, "url": url})
+    return results
+
+
+def fetch_htx_api_history() -> list[dict]:
+    """Stahuje oznámení z HTX přes Zendesk API."""
+    results = []
+    try:
+        resp = requests.get(
+            "https://support.htx.com/api/v2/help_center/en-us/articles.json",
+            params={"per_page": 50, "sort_by": "created_at", "sort_order": "desc"},
+            headers=JSON_HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"  ❌ HTX Zendesk API chyba: {e}")
+        return results
+
+    for article in data.get("articles", []):
+        title    = article.get("title", "")
+        url      = article.get("html_url", "")
+        created  = article.get("created_at", "")
+        try:
+            pub_date = datetime.fromisoformat(created.replace("Z", "+00:00")) if created else None
+        except Exception:
+            pub_date = None
+
+        if pub_date and pub_date < SINCE:
+            continue
+        if not contains_keyword(title):
+            continue
+        tokens_found = find_tokens(title)
+        if not tokens_found:
+            continue
+
+        date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+        results.append({"date": date_str, "source": "HTX", "tokens": tokens_found,
+                         "reason": first_keyword(title), "title": title, "url": url})
     return results
 
 
@@ -424,7 +611,21 @@ def main():
     exchange_results = fetch_exchange_feeds_history()
     print(f"  → celkem {len(exchange_results)} relevantních oznámení z burz")
 
-    # ── 2) Bybit API (announcement centrum bez RSS) ───────────────────────────
+    # ── 2b) Exchange API zdroje (burzy bez funkčního RSS) ────────────────────
+    print(f"\n🔌 Exchange API zdroje (burzy bez RSS):")
+    binance_results = fetch_binance_api_history()
+    print(f"  → Binance BAPI: {len(binance_results)} oznámení")
+
+    okx_results = fetch_okx_api_history()
+    print(f"  → OKX API v5: {len(okx_results)} oznámení")
+
+    kraken_support_results = fetch_kraken_support_history()
+    print(f"  → KrakenSupport Zendesk: {len(kraken_support_results)} oznámení")
+
+    htx_results = fetch_htx_api_history()
+    print(f"  → HTX Zendesk: {len(htx_results)} oznámení")
+
+    # ── 2c) Bybit API ────────────────────────────────────────────────────────
     print(f"\n🟡 Bybit API (oznámení, stránkování {DAYS} dní):")
     bybit_results = fetch_bybit_history()
     print(f"  → celkem {len(bybit_results)} relevantních oznámení")
@@ -444,10 +645,14 @@ def main():
     print("  VÝSLEDKY")
     print("=" * 65)
 
-    print_results(exchange_results, "🏦 OZNÁMENÍ BURZ (pre-delist/migrace)")
-    print_results(bybit_results,    "🟡 BYBIT (announcement API)")
-    print_results(cp_results,       "📰 CRYPTOPANIC (zprávy o kritických událostech)")
-    print_results(cmc_results,      "📊 COINMARKETCAP (již delistované tokeny)")
+    print_results(exchange_results,       "🏦 OZNÁMENÍ BURZ – RSS (pre-delist/migrace)")
+    print_results(binance_results,        "🟠 BINANCE API")
+    print_results(okx_results,            "🔵 OKX API")
+    print_results(kraken_support_results, "🐙 KRAKEN SUPPORT (Zendesk API)")
+    print_results(htx_results,            "🟣 HTX (Zendesk API)")
+    print_results(bybit_results,          "🟡 BYBIT API")
+    print_results(cp_results,             "📰 CRYPTOPANIC (zprávy o kritických událostech)")
+    print_results(cmc_results,            "📊 COINMARKETCAP (již delistované tokeny)")
 
     print("=" * 65)
 
@@ -455,7 +660,7 @@ def main():
     print("\n📨 Odesílám výsledky do Telegramu...")
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    pre_event = exchange_results + bybit_results + cp_results
+    pre_event = exchange_results + binance_results + okx_results + kraken_support_results + htx_results + bybit_results + cp_results
     if not pre_event and not cmc_results:
         send_telegram(
             f"✅ <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
@@ -466,7 +671,11 @@ def main():
     # Úvodní souhrn
     lines = [
         f"🔍 <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>",
-        f"🏦 Oznámení burz (RSS): <b>{len(exchange_results)}</b>",
+        f"🏦 RSS feedy: <b>{len(exchange_results)}</b>",
+        f"🟠 Binance API: <b>{len(binance_results)}</b>",
+        f"🔵 OKX API: <b>{len(okx_results)}</b>",
+        f"🐙 KrakenSupport: <b>{len(kraken_support_results)}</b>",
+        f"🟣 HTX API: <b>{len(htx_results)}</b>",
         f"🟡 Bybit API: <b>{len(bybit_results)}</b>",
         f"📰 CryptoPanic: <b>{len(cp_results)}</b>",
         f"📊 CMC neaktivní (post-delist): <b>{len(cmc_results)}</b>",
@@ -475,9 +684,13 @@ def main():
 
     # Detaily: nejprve pre-event (burzy + cryptopanic), pak post-event (CMC)
     for section_label, items in [
-        ("🏦 Oznámení burzy", exchange_results),
-        ("🟡 Bybit", bybit_results),
-        ("📰 CryptoPanic", cp_results),
+        ("🏦 RSS burzy",      exchange_results),
+        ("🟠 Binance",        binance_results),
+        ("🔵 OKX",            okx_results),
+        ("🐙 KrakenSupport",  kraken_support_results),
+        ("🟣 HTX",            htx_results),
+        ("🟡 Bybit",          bybit_results),
+        ("📰 CryptoPanic",    cp_results),
         ("📊 CMC (post-delist)", cmc_results),
     ]:
         for r in sorted(items, key=lambda x: x["date"], reverse=True):
