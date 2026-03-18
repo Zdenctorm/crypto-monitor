@@ -46,11 +46,20 @@ TOKENS = [
 ]
 
 # Klíčová slova indikující důležitou změnu
+# Primárně zachycují PŘED-událostní oznámení (delist, migrace, fork atd.)
 KEYWORDS = [
-    "delist", "delisting", "migration", "migrate", "swap", "upgrade",
-    "deprecat", "sunset", "network upgrade", "contract", "hard fork",
-    "maintenance", "suspend", "halt", "pause", "rebranding", "rebrand",
-    "token swap", "chain migration", "network change", "discontinu",
+    # Delisty
+    "delist", "delisting", "removal", "will be removed", "trading pair removal",
+    # Migrace a upgrady
+    "migration", "migrate", "token swap", "chain migration", "network change",
+    "network upgrade", "hard fork", "rebranding", "rebrand",
+    # Zastavení obchodování / pozastavení
+    "suspend", "suspension", "halt", "trading halt", "pause", "discontinu",
+    "wind down", "end of support", "trading stopped",
+    # Technické změny
+    "swap", "upgrade", "deprecat", "sunset", "contract",
+    # Obecná údržba (může předcházet delistu)
+    "maintenance",
 ]
 
 # Exchange announcement feed URLs
