@@ -171,7 +171,10 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(
+                feed_url,
+                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
+            )
         except Exception as e:
             log.error("Feed parse error (%s): %s", exchange, e)
             continue
@@ -191,8 +194,10 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
             tokens_found = token_in_text(full)
 
-            # Pokud jsme nenašli žádný token ale article vypadá globálně důležitý
-            # (např. "All ERC-20 tokens migration") — přidáme s tokens=[]
+            # Přeskočíme články bez konkrétního tokenu ze sledovaného seznamu
+            if not tokens_found:
+                continue
+
             alerts.append({
                 "source":  exchange,
                 "title":   title,

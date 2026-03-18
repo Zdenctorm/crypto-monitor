@@ -93,7 +93,10 @@ def fetch_exchange_feeds_history() -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(feed_url, request_headers={"User-Agent": "crypto-monitor/1.0"})
+            feed = feedparser.parse(
+                feed_url,
+                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
+            )
         except Exception as e:
             print(f"    ⚠️  {exchange}: chyba parsování ({e})")
             continue
@@ -129,6 +132,10 @@ def fetch_exchange_feeds_history() -> list[dict]:
 
             date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
             tokens_found = find_tokens(full)
+
+            # Přeskočíme články bez konkrétního tokenu ze sledovaného seznamu
+            if not tokens_found:
+                continue
 
             results.append({
                 "date":   date_str,
@@ -208,6 +215,10 @@ def fetch_cryptopanic_history() -> list[dict]:
                     sym = c.get("code", "")
                     if sym in TOKENS_SET:
                         found_tokens.append(sym)
+
+            # Přeskočíme zprávy bez konkrétního tokenu ze sledovaného seznamu
+            if not found_tokens:
+                continue
 
             results.append({
                 "date":   pub.strftime("%Y-%m-%d"),
