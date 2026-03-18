@@ -2,8 +2,13 @@
 """
 historical_check.py
 Jednorázová kontrola posledních N dní (výchozí: 30).
-Prochází CryptoPanic historii stránku po stránce a CoinMarketCap neaktivní tokeny.
-Nevyužívá seen_ids – zobrazí vše co se za období stalo.
+
+Zdroje (seřazeny podle důležitosti):
+  1. Exchange RSS feedy  — oznámení burz o nadcházejících delistech/migracích
+  2. CryptoPanic         — zpravodajské zdroje o nadcházejících delistech
+  3. CoinMarketCap       — ověření tokenů, které JSOU JIŽ neaktivní (post-event)
+
+Cíl: včasné upozornění PŘED delistingem/migrací, ne až poté.
 
 Použití:
   python historical_check.py          # posledních 30 dní
@@ -13,10 +18,12 @@ Použití:
 import sys
 import time
 import os
+import re
 import requests
+import feedparser
 from datetime import datetime, timezone, timedelta
 
-from config import TOKENS, KEYWORDS, COINMARKETCAP_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from config import TOKENS, KEYWORDS, EXCHANGE_FEEDS, COINMARKETCAP_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
 CRYPTOPANIC_API_KEY = os.environ.get("CRYPTOPANIC_API_KEY", "")
 CMC_KEY             = os.environ.get("COINMARKETCAP_API_KEY", COINMARKETCAP_API_KEY)
@@ -59,6 +66,86 @@ def first_keyword(text: str) -> str:
             return kw
     return "?"
 
+
+def find_tokens(text: str) -> list[str]:
+    """Najde sledované tokeny v textu pomocí word-boundary regex."""
+    found = []
+    upper = text.upper()
+    for token in TOKENS_SET:
+        if re.search(rf'\b{re.escape(token)}\b', upper):
+            found.append(token)
+    return found
+
+
+# ── 1) EXCHANGE RSS FEEDY (primární zdroj pre-delist oznámení) ────────────────
+
+def fetch_exchange_feeds_history() -> list[dict]:
+    """
+    Prochází RSS feedy burz a hledá oznámení o nadcházejících delistech,
+    migracích a jiných kritických událostech.
+
+    RSS feedy typicky obsahují posledních 20–100 položek bez ohledu na datum.
+    Filtrujeme na SINCE ale zobrazíme i starší pokud nejsou datovány
+    (některé feedy datum neobsahují).
+    """
+    results = []
+    print(f"  Procházím {len(EXCHANGE_FEEDS)} exchange feedů...")
+
+    for exchange, feed_url in EXCHANGE_FEEDS.items():
+        try:
+            feed = feedparser.parse(feed_url, request_headers={"User-Agent": "crypto-monitor/1.0"})
+        except Exception as e:
+            print(f"    ⚠️  {exchange}: chyba parsování ({e})")
+            continue
+
+        if not feed.entries:
+            print(f"    ⚠️  {exchange}: prázdný feed ({feed_url})")
+            continue
+
+        found_in_feed = 0
+        for entry in feed.entries:
+            title   = entry.get("title", "")
+            url     = entry.get("link", "")
+            summary = entry.get("summary", "") or ""
+            full    = f"{title} {summary}"
+
+            if not contains_keyword(full):
+                continue
+
+            # Zkus získat datum
+            pub_date = None
+            for date_field in ("published_parsed", "updated_parsed"):
+                parsed = entry.get(date_field)
+                if parsed:
+                    try:
+                        pub_date = datetime(*parsed[:6], tzinfo=timezone.utc)
+                        break
+                    except Exception:
+                        pass
+
+            # Přeskočit příliš staré záznamy (jen pokud datum víme)
+            if pub_date and pub_date < SINCE:
+                continue
+
+            date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+            tokens_found = find_tokens(full)
+
+            results.append({
+                "date":   date_str,
+                "source": exchange,
+                "tokens": tokens_found,
+                "reason": first_keyword(full),
+                "title":  title,
+                "url":    url,
+            })
+            found_in_feed += 1
+
+        print(f"    ✓  {exchange}: {found_in_feed} relevantních oznámení")
+
+    return results
+
+
+# ── 2) CRYPTOPANIC (zpravodajství o nadcházejících událostech) ─────────────────
 
 def fetch_cryptopanic_history() -> list[dict]:
     """Stránkuje CryptoPanic dokud nenarazí na zprávy starší než SINCE."""
@@ -115,12 +202,7 @@ def fetch_cryptopanic_history() -> list[dict]:
             if not contains_keyword(title):
                 continue
 
-            # tokeny z textu nebo z currencies tagu
-            import re
-            found_tokens = [
-                t for t in TOKENS_SET
-                if re.search(rf'\b{re.escape(t)}\b', title.upper())
-            ]
+            found_tokens = find_tokens(title)
             if not found_tokens:
                 for c in post.get("currencies", []):
                     sym = c.get("code", "")
@@ -150,12 +232,18 @@ def fetch_cryptopanic_history() -> list[dict]:
     return results
 
 
+# ── 3) COINMARKETCAP (ověření tokenů které JIŽ jsou neaktivní) ────────────────
+
 def fetch_cmc_inactive() -> list[dict]:
-    """Vrátí tokeny ze sledovaného seznamu, které nemají žádnou aktivní položku na CMC.
+    """
+    Vrátí tokeny ze sledovaného seznamu, které nemají žádnou aktivní položku na CMC.
+
+    POZOR: Toto je POST-event ověření — token je zde až POTÉ, co byl delistován.
+    Slouží jako záchranná síť pro případy, kdy jsme propásli předchozí oznámení.
 
     Ticker symbol může sdílet více různých coinů (aktivních i neaktivních).
     Token hlásíme jako neaktivní pouze tehdy, pokud pro daný symbol neexistuje
-    žádná aktivní položka – tj. i původně sledovaný coin byl delistován.
+    žádná aktivní položka.
     """
     if not CMC_KEY:
         print("  ⚠️  COINMARKETCAP_API_KEY není nastaven – přeskočeno")
@@ -185,15 +273,12 @@ def fetch_cmc_inactive() -> list[dict]:
             start += limit
         return results
 
-    # Symboly, které mají alespoň jednu aktivní položku na CMC
     active_symbols: set[str] = set()
     for entry in fetch_map("active"):
         sym = entry.get("symbol", "").upper()
         if sym in TOKENS_SET:
             active_symbols.add(sym)
 
-    # Neaktivní / untracked položky – zajímají nás jen ty, jejichž symbol
-    # VŮBEC nemá aktivní protějšek (jinak jde o starý coin se stejným tickerem)
     seen_inactive: dict[str, dict] = {}
     for entry in fetch_map("inactive,untracked"):
         sym = entry.get("symbol", "").upper()
@@ -205,31 +290,31 @@ def fetch_cmc_inactive() -> list[dict]:
     inactive = []
     for sym, entry in seen_inactive.items():
         inactive.append({
-            "date":   "aktuální stav",
+            "date":   "aktuální stav (post-delist)",
             "source": "CoinMarketCap",
             "tokens": [sym],
             "reason": "inactive/delist",
-            "title":  f"{sym} – žádná aktivní položka na CoinMarketCap",
+            "title":  f"{sym} – žádná aktivní položka na CoinMarketCap (delist již proběhl)",
             "url":    f"https://coinmarketcap.com/currencies/{entry.get('slug', sym.lower())}/",
         })
     return inactive
 
 
-def print_results(results: list[dict]):
+# ── VÝSTUP ────────────────────────────────────────────────────────────────────
+
+def print_results(results: list[dict], heading: str):
     if not results:
-        print("\n  ✅ Žádné záznamy o migracích/delistinzích nenalezeny.")
+        print(f"\n  ✅ {heading}: Žádné záznamy nenalezeny.")
         return
 
-    # Seřadit podle data sestupně
     results.sort(key=lambda x: x["date"], reverse=True)
 
-    # Skupinovat po tokenech
     by_token: dict[str, list] = {}
     for r in results:
         for t in (r["tokens"] or ["GENERAL"]):
             by_token.setdefault(t, []).append(r)
 
-    print(f"\n  Nalezeno {len(results)} záznamů pro {len(by_token)} tokenů:\n")
+    print(f"\n  {heading} — {len(results)} záznamů pro {len(by_token)} tokenů:\n")
     for token in sorted(by_token):
         print(f"  ┌─ [{token}]")
         for item in by_token[token]:
@@ -239,55 +324,78 @@ def print_results(results: list[dict]):
         print("  │")
 
 
+# ── MAIN ──────────────────────────────────────────────────────────────────────
+
 def main():
     print("=" * 65)
     print(f"  CRYPTO MONITOR — HISTORICKÁ KONTROLA (posledních {DAYS} dní)")
     print(f"  Od: {SINCE.strftime('%Y-%m-%d')} do: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}")
     print("=" * 65)
 
-    all_results = []
+    # ── 1) Exchange feedy (pre-delist oznámení) ───────────────────────────────
+    print(f"\n🏦 Exchange feedy (oznámení o nadcházejících delistech/migracích):")
+    exchange_results = fetch_exchange_feeds_history()
+    print(f"  → celkem {len(exchange_results)} relevantních oznámení z burz")
 
-    print(f"\n📰 CryptoPanic (stránkování zpět {DAYS} dní):")
-    cp = fetch_cryptopanic_history()
-    print(f"  → celkem {len(cp)} relevantních zpráv")
-    all_results.extend(cp)
+    # ── 2) CryptoPanic (pre-delist zprávy) ───────────────────────────────────
+    print(f"\n📰 CryptoPanic (zprávy o nadcházejících událostech, stránkování {DAYS} dní):")
+    cp_results = fetch_cryptopanic_history()
+    print(f"  → celkem {len(cp_results)} relevantních zpráv")
 
-    print(f"\n📊 CoinMarketCap (aktuálně neaktivní tokeny ze sledovaného seznamu):")
-    cmc = fetch_cmc_inactive()
-    print(f"  → celkem {len(cmc)} neaktivních tokenů ze sledovaného seznamu")
-    all_results.extend(cmc)
+    # ── 3) CoinMarketCap (post-delist ověření) ────────────────────────────────
+    print(f"\n📊 CoinMarketCap (tokeny které JIŽ jsou neaktivní — post-event ověření):")
+    cmc_results = fetch_cmc_inactive()
+    print(f"  → celkem {len(cmc_results)} tokenů bez aktivní položky na CMC")
 
+    # ── Výpis ─────────────────────────────────────────────────────────────────
     print("\n" + "=" * 65)
     print("  VÝSLEDKY")
     print("=" * 65)
-    print_results(all_results)
+
+    print_results(exchange_results, "🏦 OZNÁMENÍ BURZ (pre-delist/migrace)")
+    print_results(cp_results,       "📰 CRYPTOPANIC (zprávy o kritických událostech)")
+    print_results(cmc_results,      "📊 COINMARKETCAP (již delistované tokeny)")
+
     print("=" * 65)
 
-    # ── Telegram notifikace ──────────────────────────────────────────────────
+    # ── Telegram notifikace ───────────────────────────────────────────────────
     print("\n📨 Odesílám výsledky do Telegramu...")
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if not all_results:
+
+    pre_event = exchange_results + cp_results
+    if not pre_event and not cmc_results:
         send_telegram(
             f"✅ <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
-            "Žádné záznamy o migracích/delistinzích nenalezeny."
+            "Žádné záznamy o nadcházejících ani proběhlých delistech/migracích."
         )
-    else:
-        # Úvodní zpráva se souhrnem
-        send_telegram(
-            f"🔍 <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
-            f"Nalezeno <b>{len(all_results)}</b> záznamů. Posílám detaily..."
-        )
-        # Každý záznam jako samostatná zpráva (Telegram limit 4096 znaků)
-        for r in sorted(all_results, key=lambda x: x["date"], reverse=True):
+        return
+
+    # Úvodní souhrn
+    lines = [
+        f"🔍 <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>",
+        f"🏦 Oznámení burz: <b>{len(exchange_results)}</b>",
+        f"📰 CryptoPanic: <b>{len(cp_results)}</b>",
+        f"📊 CMC neaktivní (post-delist): <b>{len(cmc_results)}</b>",
+    ]
+    send_telegram("\n".join(lines))
+
+    # Detaily: nejprve pre-event (burzy + cryptopanic), pak post-event (CMC)
+    for section_label, items in [
+        ("🏦 Oznámení burzy", exchange_results),
+        ("📰 CryptoPanic", cp_results),
+        ("📊 CMC (post-delist)", cmc_results),
+    ]:
+        for r in sorted(items, key=lambda x: x["date"], reverse=True):
             tokens_str = ", ".join(r["tokens"]) if r["tokens"] else "GENERAL"
             msg = (
-                f"🚨 <b>[{tokens_str}]</b> – {r['reason']}\n"
+                f"{section_label}\n"
+                f"🪙 <b>[{tokens_str}]</b> – {r['reason']}\n"
                 f"📅 {r['date']} | {r['source']}\n"
                 f"{r['title'][:200]}\n"
                 f"{r['url']}"
             )
             send_telegram(msg)
-            time.sleep(0.3)  # rate limit
+            time.sleep(0.3)
 
 
 if __name__ == "__main__":
