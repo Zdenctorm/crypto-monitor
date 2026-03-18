@@ -219,6 +219,59 @@ def _extract_reason(text: str) -> str:
     return "unknown"
 
 
+# ── BYBIT API ─────────────────────────────────────────────────────────────────
+
+BYBIT_API_URL = "https://api.bybit.com/v5/announcements/index"
+
+
+def fetch_bybit(seen_ids: set) -> list[dict]:
+    """
+    Stahuje oznámení z Bybit V5 API.
+    Bybit nemá veřejné RSS (vrací 403), ale poskytuje dokumentované JSON API.
+    Endpoint: GET /v5/announcements/index?locale=en-US
+    """
+    alerts = []
+    try:
+        resp = requests.get(
+            BYBIT_API_URL,
+            params={"locale": "en-US", "limit": 50},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("Bybit API fetch error: %s", e)
+        return alerts
+
+    for item in data.get("result", {}).get("list", []):
+        title       = item.get("title", "")
+        description = item.get("description", "")
+        url         = item.get("url", "")
+        full        = f"{title} {description}"
+        uid         = item_id(url or title)
+
+        if uid in seen_ids:
+            continue
+
+        if not contains_keyword(full):
+            continue
+
+        tokens_found = token_in_text(full)
+        if not tokens_found:
+            continue
+
+        alerts.append({
+            "source":  "Bybit",
+            "title":   title,
+            "url":     url,
+            "tokens":  tokens_found,
+            "reason":  _extract_reason(full),
+            "uid":     uid,
+        })
+
+    return alerts
+
+
 # ── COINMARKETCAP ─────────────────────────────────────────────────────────────
 
 CMC_MAP_URL  = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/map"
@@ -397,7 +450,13 @@ def main():
     log.info("  → %d nových alertů z exchange feedů", len(ex_alerts))
     all_alerts.extend(ex_alerts)
 
-    # 3) CoinMarketCap (volitelné)
+    # 3) Bybit API (RSS není dostupné, používáme oficální JSON API)
+    log.info("Fetching Bybit announcements (API)...")
+    bybit_alerts = fetch_bybit(seen_ids)
+    log.info("  → %d nových alertů z Bybit", len(bybit_alerts))
+    all_alerts.extend(bybit_alerts)
+
+    # 5) CoinMarketCap (volitelné)
     if COINMARKETCAP_API_KEY:
         log.info("Fetching CoinMarketCap inactive tokens...")
         cmc_alerts = fetch_coinmarketcap(seen_ids)

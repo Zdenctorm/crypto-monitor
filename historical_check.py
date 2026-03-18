@@ -243,7 +243,83 @@ def fetch_cryptopanic_history() -> list[dict]:
     return results
 
 
-# ── 3) COINMARKETCAP (ověření tokenů které JIŽ jsou neaktivní) ────────────────
+# ── 3) BYBIT API (announcement centrum bez RSS) ───────────────────────────────
+
+def fetch_bybit_history() -> list[dict]:
+    """
+    Prochází Bybit V5 API a hledá oznámení v posledních DAYS dnech.
+    Bybit nemá veřejné RSS (403), ale poskytuje dokumentované JSON API.
+    """
+    results = []
+    page = 1
+    BYBIT_URL = "https://api.bybit.com/v5/announcements/index"
+
+    while True:
+        try:
+            resp = requests.get(
+                BYBIT_URL,
+                params={"locale": "en-US", "limit": 50, "page": page},
+                timeout=20,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  ❌ Bybit API chyba (strana {page}): {e}")
+            break
+
+        items = data.get("result", {}).get("list", [])
+        if not items:
+            break
+
+        stop = False
+        for item in items:
+            ts_ms = item.get("dateTimestamp") or item.get("startDateTimestamp", 0)
+            try:
+                pub_date = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc)
+            except Exception:
+                pub_date = None
+
+            if pub_date and pub_date < SINCE:
+                stop = True
+                break
+
+            title       = item.get("title", "")
+            description = item.get("description", "")
+            url         = item.get("url", "")
+            full        = f"{title} {description}"
+
+            if not contains_keyword(full):
+                continue
+
+            tokens_found = find_tokens(full)
+            if not tokens_found:
+                continue
+
+            date_str = pub_date.strftime("%Y-%m-%d") if pub_date else "datum neznámé"
+            results.append({
+                "date":   date_str,
+                "source": "Bybit",
+                "tokens": tokens_found,
+                "reason": first_keyword(full),
+                "title":  title,
+                "url":    url,
+            })
+
+        if stop:
+            print(f"  → dosaženo staré datum, zastaveno na straně {page}")
+            break
+
+        total = data.get("result", {}).get("total", 0)
+        if page * 50 >= total:
+            break
+
+        page += 1
+        time.sleep(0.3)
+
+    return results
+
+
+# ── 4) COINMARKETCAP (ověření tokenů které JIŽ jsou neaktivní) ────────────────
 
 def fetch_cmc_inactive() -> list[dict]:
     """
@@ -348,12 +424,17 @@ def main():
     exchange_results = fetch_exchange_feeds_history()
     print(f"  → celkem {len(exchange_results)} relevantních oznámení z burz")
 
-    # ── 2) CryptoPanic (pre-delist zprávy) ───────────────────────────────────
+    # ── 2) Bybit API (announcement centrum bez RSS) ───────────────────────────
+    print(f"\n🟡 Bybit API (oznámení, stránkování {DAYS} dní):")
+    bybit_results = fetch_bybit_history()
+    print(f"  → celkem {len(bybit_results)} relevantních oznámení")
+
+    # ── 3) CryptoPanic (pre-delist zprávy) ───────────────────────────────────
     print(f"\n📰 CryptoPanic (zprávy o nadcházejících událostech, stránkování {DAYS} dní):")
     cp_results = fetch_cryptopanic_history()
     print(f"  → celkem {len(cp_results)} relevantních zpráv")
 
-    # ── 3) CoinMarketCap (post-delist ověření) ────────────────────────────────
+    # ── 4) CoinMarketCap (post-delist ověření) ────────────────────────────────
     print(f"\n📊 CoinMarketCap (tokeny které JIŽ jsou neaktivní — post-event ověření):")
     cmc_results = fetch_cmc_inactive()
     print(f"  → celkem {len(cmc_results)} tokenů bez aktivní položky na CMC")
@@ -364,6 +445,7 @@ def main():
     print("=" * 65)
 
     print_results(exchange_results, "🏦 OZNÁMENÍ BURZ (pre-delist/migrace)")
+    print_results(bybit_results,    "🟡 BYBIT (announcement API)")
     print_results(cp_results,       "📰 CRYPTOPANIC (zprávy o kritických událostech)")
     print_results(cmc_results,      "📊 COINMARKETCAP (již delistované tokeny)")
 
@@ -373,7 +455,7 @@ def main():
     print("\n📨 Odesílám výsledky do Telegramu...")
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    pre_event = exchange_results + cp_results
+    pre_event = exchange_results + bybit_results + cp_results
     if not pre_event and not cmc_results:
         send_telegram(
             f"✅ <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>\n"
@@ -384,7 +466,8 @@ def main():
     # Úvodní souhrn
     lines = [
         f"🔍 <b>Historická kontrola {date_str} (posledních {DAYS} dní)</b>",
-        f"🏦 Oznámení burz: <b>{len(exchange_results)}</b>",
+        f"🏦 Oznámení burz (RSS): <b>{len(exchange_results)}</b>",
+        f"🟡 Bybit API: <b>{len(bybit_results)}</b>",
         f"📰 CryptoPanic: <b>{len(cp_results)}</b>",
         f"📊 CMC neaktivní (post-delist): <b>{len(cmc_results)}</b>",
     ]
@@ -393,6 +476,7 @@ def main():
     # Detaily: nejprve pre-event (burzy + cryptopanic), pak post-event (CMC)
     for section_label, items in [
         ("🏦 Oznámení burzy", exchange_results),
+        ("🟡 Bybit", bybit_results),
         ("📰 CryptoPanic", cp_results),
         ("📊 CMC (post-delist)", cmc_results),
     ]:

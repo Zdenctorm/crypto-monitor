@@ -64,70 +64,40 @@ KEYWORDS = [
 
 # Exchange announcement feed URLs
 #
-# STRATEGIE: Pro každou burzu monitorujeme jak hlavní blog, tak support/announcement centrum.
-# Delistingy a migrace jsou VŽDY v announcement centru — blog může mít zpoždění nebo je vůbec nepostí.
-# Příklad: Kraken oznámil migraci OM→MANTRA (únor 2026) pouze přes support centrum, ne blog.
+# STRATEGIE: RSS feedy + JSON API pro burzy bez RSS.
+# Delistingy a migrace jsou VŽDY v announcement centru.
 #
-# Pokrytí jednotlivých burz:
-#   Kraken      → blog + Zendesk support centrum (kategorie Announcements)
-#   Coinbase    → blog  [help.coinbase.com používá Intercom, RSS nedostupné]
-#   Binance     → announcement RSS + delisting-specifická kategorie (navId=161)
-#   OKX         → help center RSS (pokrývá všechny sekce vč. delistingů)
-#   Bybit       → přímo announcements.bybit.com (= support centrum)
-#   Crypto.com  → obecný feed  [exchange.crypto.com/announcements RSS nedostupné]
-#   KuCoin      → news RSS + announcement RSS (dva oddělené endpointy)
-#   Gate.io     → article RSS + announcement RSS (announcement centrum na gate.com)
-#   MEXC        → blog  [support centrum bez RSS]
-#   Huobi/HTX   → announcement RSS
+# Výsledky health checku (2026-03-18):
+#   Kraken blog     ✅ RSS funguje (10 položek)
+#   KrakenSupport   ❌ 403 — Zendesk blokuje category RSS; sekce RSS zatím nenalezena
+#                      POZOR: OM→MANTRA migrace (únor 2026) byla POUZE zde. Nutno sledovat!
+#   Coinbase        ❌ 403 — blokováno, bez alternativy
+#   Binance         ⚠️  RSS vrací 0 položek (možný soft-block / Cloudflare)
+#   OKX             ❌ 404 — help-center/rss neexistuje, OKX nemá veřejné RSS
+#   Bybit           ❌ RSS 403, ale má OFICIÁLNÍ JSON API → fetch_bybit() v crypto_monitor.py
+#   Crypto.com      ❌ 404 — neexistuje
+#   KuCoin news     ✅ RSS funguje (50 položek)
+#   KuCoinAnnounce  ❌ 404 — endpoint neexistuje
+#   Gate.io         ❌ malformed XML (Cloudflare challenge page)
+#   GateAnnounce    ❌ malformed XML (Cloudflare challenge page)
+#   HTX (Huobi)     ❌ 403 — blokováno
 
 EXCHANGE_FEEDS = {
     # ── Kraken ───────────────────────────────────────────────────────────────
-    # POZOR: Migrace/delistingy jsou výhradně ve support centru, ne na blogu!
-    # Příklad: OM→MANTRA migrace (únor 2026) byla pouze na support.kraken.com
+    # Blog pokrývá obecné zprávy; support centrum je KRITICKÉ pro delistingy/migrace
+    # ale category RSS vrací 403. Pokud najdeš sekci RSS, přidej KrakenSupport zpět.
+    # Postup: najdi section ID na support.kraken.com/hc/en-us/categories/200187583
+    # a zkus: https://support.kraken.com/hc/en-us/sections/{SECTION_ID}/articles.rss
     "Kraken":               "https://blog.kraken.com/feed",
-    "KrakenSupport":        "https://support.kraken.com/hc/en-us/categories/200187583-Announcements/articles.rss",
-
-    # ── Coinbase ─────────────────────────────────────────────────────────────
-    # help.coinbase.com používá Intercom (ne Zendesk) → RSS nedostupné.
-    # Delistingy a migrace jsou oznamovány na blogu i přes @CoinbaseAssets na X.
-    "Coinbase":             "https://www.coinbase.com/blog/landing/rss",
 
     # ── Binance ──────────────────────────────────────────────────────────────
-    # Hlavní announcement feed pokrývá vše; delisting kategorie (navId=161)
-    # filtruje pouze delistingy → méně šumu, rychlejší záchyt.
+    # Vrací 0 položek — možný Cloudflare soft-block. Zachováváme, monitorujeme.
     "Binance":              "https://www.binance.com/en/support/announcement/rss",
     "BinanceDelisting":     "https://www.binance.com/en/support/announcement/rss?navId=161",
 
-    # ── OKX ──────────────────────────────────────────────────────────────────
-    # Help center RSS pokrývá celý support vč. sekce Delistings & migrations.
-    # Dedikovaná sekce: okx.com/help/section/announcements-delistings
-    "OKX":                  "https://www.okx.com/help-center/rss",
-
-    # ── Bybit ────────────────────────────────────────────────────────────────
-    # announcements.bybit.com JE přímo support/announcement centrum (ne blog).
-    # Pokrývá delistingy, maintenance, token migrace.
-    "Bybit":                "https://announcements.bybit.com/en-US/rss/",
-
-    # ── Crypto.com ───────────────────────────────────────────────────────────
-    # crypto.com/exchange/announcements/list nemá RSS.
-    # Obecný feed zachytí klíčová oznámení.
-    "CryptoCom":            "https://crypto.com/en/feed/rss",
-
     # ── KuCoin ───────────────────────────────────────────────────────────────
-    # Dva oddělené endpointy: news RSS a announcement RSS.
-    # Announcement RSS (~kucoin.com/announcement) pokrývá delistingy přímo.
+    # Pouze news RSS funguje; announcement endpoint (rss/announcement) vrací 404.
     "KuCoin":               "https://www.kucoin.com/rss/news?lang=en_US",
-    "KuCoinAnnouncement":   "https://www.kucoin.com/rss/announcement?lang=en_US",
-
-    # ── Gate.io ──────────────────────────────────────────────────────────────
-    # article/rss = obecné články; announcement/rss = gate.com announcement centrum.
-    # Delistingy na: gate.com/announcements/delisted
-    "Gate":                 "https://www.gate.io/article/rss",
-    "GateAnnouncement":     "https://www.gate.com/announcements/rss",
-
-    # ── HTX (Huobi) ──────────────────────────────────────────────────────────
-    # HTX je přejmenovaný Huobi; announcement centrum má vlastní RSS.
-    "HTX":                  "https://www.htx.com/support/en-us/rss/",
 }
 
 # CoinMarketCap API key (volitelné – free tier stačí)

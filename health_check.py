@@ -24,13 +24,9 @@ import feedparser
 from config import EXCHANGE_FEEDS
 
 # Feedy, které jsou "volitelné" — jejich selhání nevyhodí exit(1).
-# Jsou to převážně kategorie-specifické nebo sekundární support RSS feedy,
-# které mohou mít přísnější rate-limiting nebo Cloudflare ochranu.
+# BinanceDelisting je záloha k hlavnímu Binance feedu; ostatní jsou povinné.
 OPTIONAL_FEEDS = {
     "BinanceDelisting",   # kategorie navId=161 — záloha k hlavnímu Binance feedu
-    "KuCoinAnnouncement", # announcement centrum — záloha k hlavnímu KuCoin feedu
-    "GateAnnouncement",   # gate.com announcement centrum — záloha k Gate feedu
-    "HTX",                # Huobi/HTX — méně kritická burza
 }
 
 CRYPTOPANIC_API_KEY   = os.environ.get("CRYPTOPANIC_API_KEY", "")
@@ -48,6 +44,10 @@ def check_feed(name: str, url: str) -> bool:
         if feed.bozo and entry_count == 0:
             print(f"  ❌ {name}: prázdný nebo chybný feed ({feed.bozo_exception})")
             return False
+        if entry_count == 0:
+            # Feed vrátí HTTP 200 + validní XML ale 0 položek → možný Cloudflare soft-block
+            print(f"  ⚠️  {name}: HTTP 200 ale 0 položek – možný Cloudflare soft-block! ({url})")
+            return False
         print(f"  ✅ {name}: OK ({entry_count} položek)")
         return True
     except requests.exceptions.HTTPError as e:
@@ -58,6 +58,28 @@ def check_feed(name: str, url: str) -> bool:
         return False
     except Exception as e:
         print(f"  ❌ {name}: {e}")
+        return False
+
+
+def check_bybit_api() -> bool:
+    """Ověří Bybit V5 Announcements API (náhrada za RSS, které vrací 403)."""
+    try:
+        resp = requests.get(
+            "https://api.bybit.com/v5/announcements/index",
+            params={"locale": "en-US", "limit": 1},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        count = len(data.get("result", {}).get("list", []))
+        total = data.get("result", {}).get("total", "?")
+        print(f"  ✅ Bybit API: OK ({total} oznámení celkem)")
+        return True
+    except requests.exceptions.HTTPError as e:
+        print(f"  ❌ Bybit API: HTTP {e.response.status_code}")
+        return False
+    except Exception as e:
+        print(f"  ❌ Bybit API: {e}")
         return False
 
 
@@ -178,6 +200,12 @@ def main():
     required_results.append(cp_ok)
     if not cp_ok:
         failed_names.append("CryptoPanic API")
+
+    bybit_ok = check_bybit_api()
+    required_results.append(bybit_ok)
+    if not bybit_ok:
+        failed_names.append("Bybit API")
+
     check_coinmarketcap()   # volitelné, neblokuje workflow
 
     # ── Telegram ─────────────────────────────────────────────────
