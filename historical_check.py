@@ -93,7 +93,10 @@ def fetch_exchange_feeds_history() -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(feed_url, request_headers={"User-Agent": "crypto-monitor/1.0"})
+            feed = feedparser.parse(
+                feed_url,
+                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
+            )
         except Exception as e:
             print(f"    ⚠️  {exchange}: chyba parsování ({e})")
             continue

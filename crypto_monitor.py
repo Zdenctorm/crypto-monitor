@@ -171,7 +171,10 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
     for exchange, feed_url in EXCHANGE_FEEDS.items():
         try:
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(
+                feed_url,
+                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"},
+            )
         except Exception as e:
             log.error("Feed parse error (%s): %s", exchange, e)
             continue

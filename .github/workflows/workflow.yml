@@ -32,6 +32,7 @@ jobs:
             monitor-state-
 
       - name: Health check – ověř dostupnost zdrojů
+        continue-on-error: true   # selhání feedu nezastaví monitor; chyba jde do Telegramu
         env:
           CRYPTOPANIC_API_KEY: ${{ secrets.CRYPTOPANIC_API_KEY }}
           TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}

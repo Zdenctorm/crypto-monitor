@@ -41,7 +41,7 @@ COINMARKETCAP_API_KEY = os.environ.get("COINMARKETCAP_API_KEY", "")
 
 def check_feed(name: str, url: str) -> bool:
     try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "crypto-monitor/1.0"})
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"})
         resp.raise_for_status()
         feed = feedparser.parse(resp.text)
         entry_count = len(feed.entries)
@@ -127,11 +127,30 @@ def check_coinmarketcap() -> bool | None:
         return False
 
 
+def send_telegram_alert(failed_feeds: list[str]):
+    """Pošle Telegram zprávu pokud jsou nefunkční feedy."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    lines = ["⚠️ <b>Health Check – nefunkční zdroje</b>"]
+    for name in failed_feeds:
+        lines.append(f"  ❌ {name}")
+    lines.append("\nMonitor běží, ale tato data dnes chybí. Zkontroluj GitHub Actions log.")
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": "\n".join(lines), "parse_mode": "HTML"},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def main():
     print("=" * 60)
     print("  CRYPTO MONITOR — HEALTH CHECK")
     print("=" * 60)
 
+    failed_names: list[str] = []
     required_results: list[bool] = []
 
     # ── RSS Exchange feedy ────────────────────────────────────────
@@ -141,6 +160,8 @@ def main():
             continue
         ok = check_feed(name, url)
         required_results.append(ok)
+        if not ok:
+            failed_names.append(name)
 
     print("\n📡 RSS Exchange Feedy (volitelné — selhání nevyhodí chybu):")
     for name, url in EXCHANGE_FEEDS.items():
@@ -148,30 +169,37 @@ def main():
             continue
         ok = check_feed(name, url)
         if not ok:
-            # Jen varování, nepřidáváme do required_results
             print(f"     ↳ {name} selhal – volitelný feed, monitor pokračuje")
+            failed_names.append(f"{name} (volitelný)")
 
     # ── API zdroje ───────────────────────────────────────────────
     print("\n🔑 API Zdroje:")
-    required_results.append(check_cryptopanic())
+    cp_ok = check_cryptopanic()
+    required_results.append(cp_ok)
+    if not cp_ok:
+        failed_names.append("CryptoPanic API")
     check_coinmarketcap()   # volitelné, neblokuje workflow
 
     # ── Telegram ─────────────────────────────────────────────────
     print("\n📬 Telegram:")
-    required_results.append(check_telegram())
+    tg_ok = check_telegram()
+    required_results.append(tg_ok)
 
     # ── Výsledek ─────────────────────────────────────────────────
     print("\n" + "=" * 60)
     failed = sum(1 for r in required_results if r is False)
     total  = len(required_results)
-    ok     = total - failed
+    ok_count = total - failed
 
     if failed:
         print(f"  ❌ SELHALO {failed}/{total} zdrojů – zkontroluj výstup výše")
         print("=" * 60)
+        # Pošli Telegram alert o nefunkčních feedech (pokud Telegram funguje)
+        if tg_ok and failed_names:
+            send_telegram_alert(failed_names)
         sys.exit(1)
     else:
-        print(f"  ✅ Všechny zdroje fungují ({ok}/{total})")
+        print(f"  ✅ Všechny zdroje fungují ({ok_count}/{total})")
         print("=" * 60)
 
 
