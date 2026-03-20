@@ -22,6 +22,7 @@ from config import (
     COINMARKETCAP_API_KEY,
 )
 from currency_contracts import TOKEN_CONTRACTS
+from exchange_scraper import fetch_all_scrapers
 
 # ── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -210,6 +211,44 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
     return alerts
 
 
+def fetch_exchange_scrapers(seen_ids: set) -> list[dict]:
+    """
+    Scraping alternativa k RSS feedům.
+    Používá JSON API (Binance, Bybit, Kraken) + HTML scraping (ostatní burzy).
+    Aplikuje stejné filtrování klíčových slov a tokenů jako fetch_exchange_feeds().
+    """
+    alerts = []
+    raw_items = fetch_all_scrapers()
+
+    for item in raw_items:
+        title  = item.get("title", "")
+        url    = item.get("url", "")
+        source = item.get("source", "scraper")
+        full   = title
+        uid    = item_id(url or title)
+
+        if uid in seen_ids:
+            continue
+
+        if not contains_keyword(full):
+            continue
+
+        tokens_found = token_in_text(full)
+        if not tokens_found:
+            continue
+
+        alerts.append({
+            "source":  source,
+            "title":   title,
+            "url":     url,
+            "tokens":  tokens_found,
+            "reason":  _extract_reason(full),
+            "uid":     uid,
+        })
+
+    return alerts
+
+
 def _extract_reason(text: str) -> str:
     """Najde první klíčové slovo v textu jako zkrácený důvod."""
     t = text.lower()
@@ -392,12 +431,18 @@ def main():
     all_alerts.extend(cp_alerts)
 
     # 2) Exchange RSS feeds
-    log.info("Fetching exchange feeds...")
+    log.info("Fetching exchange feeds (RSS)...")
     ex_alerts = fetch_exchange_feeds(seen_ids)
-    log.info("  → %d nových alertů z exchange feedů", len(ex_alerts))
+    log.info("  → %d nových alertů z exchange RSS feedů", len(ex_alerts))
     all_alerts.extend(ex_alerts)
 
-    # 3) CoinMarketCap (volitelné)
+    # 3) Exchange Web Scraping (záloha za RSS + burzy bez RSS)
+    log.info("Fetching exchange feeds (web scraping)...")
+    scrape_alerts = fetch_exchange_scrapers(seen_ids)
+    log.info("  → %d nových alertů z web scrapingu", len(scrape_alerts))
+    all_alerts.extend(scrape_alerts)
+
+    # 4) CoinMarketCap (volitelné)
     if COINMARKETCAP_API_KEY:
         log.info("Fetching CoinMarketCap inactive tokens...")
         cmc_alerts = fetch_coinmarketcap(seen_ids)
