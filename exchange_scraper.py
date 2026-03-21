@@ -21,7 +21,6 @@ import time
 import xml.etree.ElementTree as ET
 
 import requests
-from bs4 import BeautifulSoup
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +66,6 @@ def _post(url: str, body: dict) -> requests.Response | None:
         log.warning("POST failed (%s): %s", url, e)
         return None
 
-
-def _soup(html: str) -> BeautifulSoup:
-    return BeautifulSoup(html, "html.parser")
 
 
 def _dedup(items: list[dict]) -> list[dict]:
@@ -300,13 +296,16 @@ def scrape_okx() -> list[dict]:
         if not resp:
             continue
         try:
-            soup = _soup(resp.text)
-            # Najdeme SSR data script tag
-            script = soup.find("script", {"data-id": "__app_data_for_ssr__"})
-            if not script or not script.string:
+            # Regex extrakce JSON z <script data-id="__app_data_for_ssr__">…</script>
+            m = re.search(
+                r'<script[^>]+data-id=["\']__app_data_for_ssr__["\'][^>]*>(.*?)</script>',
+                resp.text,
+                re.DOTALL,
+            )
+            if not m:
                 log.warning("OKX: SSR script tag nenalezen pro sekci %s", section_slug)
                 continue
-            data = json.loads(script.string)
+            data = json.loads(m.group(1))
             # Navigujeme JSON strukturou
             article_list = (
                 data.get("appContext", {})
