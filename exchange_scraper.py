@@ -6,18 +6,19 @@ Strategie pro každou burzu:
   Binance      → interní JSON API (catalogId=161 delistingy, catalogId=48 obecná)
   Bybit        → JSON API (api2.bybit.com)
   Kraken       → Zendesk JSON API (support.kraken.com)
-  Coinbase     → HTML scraping blogu
-  OKX          → HTML scraping announcement sekce
-  KuCoin       → HTML scraping announcement centra
-  Gate.io      → HTML scraping announcement sekce
-  HTX          → HTML scraping support centra
-  Crypto.com   → HTML scraping announcement stránky
+  KuCoin       → oficiální v3 REST API (api.kucoin.com/api/v3/announcements)
+  HTX          → Zendesk JSON API (huobiglobal.zendesk.com)
+  Crypto.com   → veřejné POST API (api.crypto.com/v1/public/get-announcements)
+  OKX          → SSR JSON embed v HTML stránce (script[data-id=__app_data_for_ssr__])
+  Gate.io      → interní JSON API (api.gate.io/articlelist)
+  Coinbase     → Medium RSS feed (blog.coinbase.com/feed) + fallback HTML
 """
 
-import hashlib
+import json
 import logging
 import re
 import time
+import xml.etree.ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
@@ -53,7 +54,17 @@ def _get(url: str, *, use_json: bool = False, params: dict = None) -> requests.R
         resp.raise_for_status()
         return resp
     except Exception as e:
-        log.warning("Scrape GET failed (%s): %s", url, e)
+        log.warning("GET failed (%s): %s", url, e)
+        return None
+
+
+def _post(url: str, body: dict) -> requests.Response | None:
+    try:
+        resp = requests.post(url, json=body, headers=_JSON_HEADERS, timeout=TIMEOUT)
+        resp.raise_for_status()
+        return resp
+    except Exception as e:
+        log.warning("POST failed (%s): %s", url, e)
         return None
 
 
@@ -91,7 +102,6 @@ def scrape_binance() -> list[dict]:
             continue
         try:
             data = resp.json()
-            # Struktura: data.catalogs[].articles[] nebo rovnou data.articles[]
             catalogs = data.get("data", {}).get("catalogs", [])
             articles = []
             if catalogs:
@@ -143,14 +153,12 @@ def scrape_kraken() -> list[dict]:
     Zendesk JSON API — Kraken Support.
     Sekce 200187503 = Announcements (delistingy, migrace).
     """
-    # Zkusíme nejprve přímo sekci Announcements
     resp = _get(
         "https://support.kraken.com/api/v2/help_center/en-us/sections/200187503/articles.json",
         use_json=True,
         params={"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
     )
     if not resp:
-        # Fallback: hledat přes label
         resp = _get(
             "https://support.kraken.com/api/v2/help_center/en-us/articles.json",
             use_json=True,
@@ -169,156 +177,266 @@ def scrape_kraken() -> list[dict]:
         return []
 
 
-# ─── COINBASE ─────────────────────────────────────────────────────────────────
-
-def scrape_coinbase() -> list[dict]:
-    """HTML scraping — Coinbase blog, sekce s asset news."""
-    for url in [
-        "https://www.coinbase.com/blog/landing/assets",
-        "https://www.coinbase.com/blog",
-    ]:
-        resp = _get(url)
-        if resp:
-            break
-    else:
-        return []
-
-    soup = _soup(resp.text)
-    results = []
-    for a in soup.find_all("a", href=re.compile(r"/blog/")):
-        # Hledáme nadpis uvnitř odkazu
-        title_el = a.find(["h1", "h2", "h3", "h4"])
-        title = title_el.get_text(strip=True) if title_el else a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
-            continue
-        full_url = href if href.startswith("http") else f"https://www.coinbase.com{href}"
-        results.append({"title": title, "url": full_url, "source": "Coinbase"})
-    return _dedup(results)[:20]
-
-
-# ─── OKX ─────────────────────────────────────────────────────────────────────
-
-def scrape_okx() -> list[dict]:
-    """HTML scraping — OKX Help Center, sekce delistings."""
-    for url in [
-        "https://www.okx.com/help/section/announcements-delistings",
-        "https://www.okx.com/help/section/latest-announcements",
-    ]:
-        resp = _get(url)
-        if resp:
-            break
-    else:
-        return []
-
-    soup = _soup(resp.text)
-    results = []
-    for a in soup.find_all("a", href=re.compile(r"/help/")):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
-            continue
-        full_url = href if href.startswith("http") else f"https://www.okx.com{href}"
-        results.append({"title": title, "url": full_url, "source": "OKX"})
-    return _dedup(results)[:20]
-
-
 # ─── KUCOIN ───────────────────────────────────────────────────────────────────
 
 def scrape_kucoin() -> list[dict]:
-    """HTML scraping — KuCoin Announcement Center (delistingy)."""
-    for url in [
-        "https://www.kucoin.com/news/categories/soft-delisting",
-        "https://www.kucoin.com/announcement",
-    ]:
-        resp = _get(url)
-        if resp:
-            break
-    else:
-        return []
-
-    soup = _soup(resp.text)
+    """
+    KuCoin oficiální v3 REST API.
+    Dokumentace: https://www.kucoin.com/docs-new/rest/spot-trading/market-data/get-announcements
+    annType=delistings zachytí přímo delistingy; latest-announcements zachytí vše nové.
+    """
     results = []
-    for a in soup.find_all("a", href=re.compile(r"/news/|/announcement")):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
+    for ann_type in ["delistings", "latest-announcements"]:
+        resp = _get(
+            "https://api.kucoin.com/api/v3/announcements",
+            use_json=True,
+            params={"annType": ann_type, "lang": "en_US", "currentPage": 1, "pageSize": 20},
+        )
+        if not resp:
             continue
-        full_url = href if href.startswith("http") else f"https://www.kucoin.com{href}"
-        results.append({"title": title, "url": full_url, "source": "KuCoin"})
-    return _dedup(results)[:20]
-
-
-# ─── GATE.IO ──────────────────────────────────────────────────────────────────
-
-def scrape_gate() -> list[dict]:
-    """HTML scraping — Gate.io Announcements (delisted sekce)."""
-    for url in [
-        "https://www.gate.io/en/article/delisted",
-        "https://www.gate.io/en/article/announcements",
-    ]:
-        resp = _get(url)
-        if resp:
-            break
-    else:
-        return []
-
-    soup = _soup(resp.text)
-    results = []
-    for a in soup.find_all("a", href=re.compile(r"/en/article/")):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
-            continue
-        full_url = href if href.startswith("http") else f"https://www.gate.io{href}"
-        results.append({"title": title, "url": full_url, "source": "Gate"})
-    return _dedup(results)[:20]
+        try:
+            data = resp.json()
+            if data.get("code") != "200000":
+                log.warning("KuCoin API vrátil chybu (annType=%s): %s", ann_type, data.get("msg"))
+                continue
+            items = data.get("data", {}).get("items", [])
+            for item in items:
+                title = item.get("annTitle", "").strip()
+                url = item.get("annUrl", "")
+                if title:
+                    results.append({"title": title, "url": url, "source": "KuCoin"})
+        except Exception as e:
+            log.error("KuCoin JSON parse error (annType=%s): %s", ann_type, e)
+        time.sleep(0.3)
+    return _dedup(results)
 
 
 # ─── HTX (HUOBI) ──────────────────────────────────────────────────────────────
 
 def scrape_htx() -> list[dict]:
-    """HTML scraping — HTX Support Center, sekce oznámení."""
-    resp = _get("https://www.htx.com/support/en-us/list/360000043694")
-    if not resp:
-        return []
-
-    soup = _soup(resp.text)
-    results = []
-    for a in soup.find_all("a", href=re.compile(r"/support/en-us/")):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
-            continue
-        full_url = href if href.startswith("http") else f"https://www.htx.com{href}"
-        results.append({"title": title, "url": full_url, "source": "HTX"})
-    return _dedup(results)[:20]
-
-
-# ─── CRYPTO.COM ───────────────────────────────────────────────────────────────
-
-def scrape_cryptocom() -> list[dict]:
-    """HTML scraping — Crypto.com Exchange announcement stránka."""
-    for url in [
-        "https://crypto.com/exchange/announcements/list",
-        "https://crypto.com/en/news",
+    """
+    HTX support centrum běží na Zendesk (huobiglobal.zendesk.com).
+    Stahujeme nejnovější články ze sekce oznámení.
+    """
+    # Zkusíme nejprve specifickou sekci oznámení (section_id z HTX URL vzorů)
+    for url, params in [
+        (
+            "https://huobiglobal.zendesk.com/api/v2/help_center/en-us/sections/360000070201/articles.json",
+            {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+        (
+            "https://huobiglobal.zendesk.com/api/v2/help_center/en-us/articles.json",
+            {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
     ]:
-        resp = _get(url)
+        resp = _get(url, use_json=True, params=params)
         if resp:
             break
     else:
         return []
 
-    soup = _soup(resp.text)
+    try:
+        articles = resp.json().get("articles", [])
+        return [
+            {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "HTX"}
+            for a in articles if a.get("title")
+        ]
+    except Exception as e:
+        log.error("HTX Zendesk parse error: %s", e)
+        return []
+
+
+# ─── CRYPTO.COM ───────────────────────────────────────────────────────────────
+
+def scrape_cryptocom() -> list[dict]:
+    """
+    Crypto.com Exchange veřejné API — announcements endpoint.
+    Dokumentace: https://exchange-docs.crypto.com/exchange/v1/rest-ws/index.html
+    """
+    body = {
+        "id": 1,
+        "method": "public/get-announcements",
+        "params": {},
+        "nonce": int(time.time() * 1000),
+    }
+    resp = _post("https://api.crypto.com/v1/public/get-announcements", body)
+    if not resp:
+        return []
+    try:
+        data = resp.json()
+        if data.get("code") != 0:
+            log.warning("Crypto.com API chyba: %s", data.get("message"))
+            return []
+        items = data.get("result", {}).get("data", [])
+        results = []
+        for item in items:
+            title = item.get("title", "").strip()
+            # API nevrací přímé URL; sestavíme odkaz na announcements stránku
+            ann_id = item.get("id", "")
+            url = f"https://crypto.com/exchange/announcements/{ann_id}" if ann_id else "https://crypto.com/exchange/announcements"
+            if title:
+                results.append({"title": title, "url": url, "source": "CryptoCom"})
+        return results
+    except Exception as e:
+        log.error("Crypto.com JSON parse error: %s", e)
+        return []
+
+
+# ─── OKX ─────────────────────────────────────────────────────────────────────
+
+def scrape_okx() -> list[dict]:
+    """
+    OKX help center používá Next.js SSR — data jsou vložena přímo do HTML
+    v tagu <script data-id="__app_data_for_ssr__"> jako JSON objekt.
+    Funguje s běžným HTTP requestem (není potřeba headless browser).
+    """
     results = []
-    for a in soup.find_all("a", href=re.compile(r"/exchange/announcements/|/en/news/")):
-        title = a.get_text(strip=True)
-        href = a.get("href", "")
-        if not title or len(title) < 10:
+    for section_slug, source_label in [
+        ("announcements-delistings", "OKXDelisting"),
+        ("latest-announcements", "OKX"),
+    ]:
+        url = f"https://www.okx.com/help/section/{section_slug}"
+        resp = _get(url)
+        if not resp:
             continue
-        full_url = href if href.startswith("http") else f"https://crypto.com{href}"
-        results.append({"title": title, "url": full_url, "source": "CryptoCom"})
-    return _dedup(results)[:20]
+        try:
+            soup = _soup(resp.text)
+            # Najdeme SSR data script tag
+            script = soup.find("script", {"data-id": "__app_data_for_ssr__"})
+            if not script or not script.string:
+                log.warning("OKX: SSR script tag nenalezen pro sekci %s", section_slug)
+                continue
+            data = json.loads(script.string)
+            # Navigujeme JSON strukturou
+            article_list = (
+                data.get("appContext", {})
+                    .get("initialProps", {})
+                    .get("sectionData", {})
+                    .get("articleList", {})
+            )
+            items = article_list.get("items", [])
+            if not items:
+                # Alternativní cesta v JSON struktuře
+                items = (
+                    data.get("initialProps", {})
+                        .get("sectionData", {})
+                        .get("articleList", {})
+                        .get("items", [])
+                )
+            for item in items:
+                title = item.get("title", "").strip()
+                slug = item.get("slug", "") or str(item.get("id", ""))
+                article_url = f"https://www.okx.com/help/{slug}" if slug else ""
+                if title:
+                    results.append({"title": title, "url": article_url, "source": source_label})
+        except json.JSONDecodeError as e:
+            log.error("OKX SSR JSON parse error (%s): %s", section_slug, e)
+        except Exception as e:
+            log.error("OKX scrape error (%s): %s", section_slug, e)
+        time.sleep(0.5)
+    return _dedup(results)
+
+
+# ─── GATE.IO ──────────────────────────────────────────────────────────────────
+
+def scrape_gate() -> list[dict]:
+    """
+    Gate.io interní JSON API pro články/oznámení.
+    Primárně zkusíme api.gate.io/articlelist; fallback na web API.
+    """
+    results = []
+
+    # Pokus 1: api.gate.io/articlelist s filtrováním kategorie
+    for category, source_label in [("Delisted", "GateDelisted"), ("Announcement", "Gate")]:
+        resp = _get(
+            "https://api.gate.io/articlelist",
+            use_json=True,
+            params={"type": category, "page": 1, "size": 20},
+        )
+        if resp:
+            try:
+                data = resp.json()
+                # Zkusíme různé struktury odpovědi
+                items = []
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    items = data.get("data", data.get("list", data.get("articles", [])))
+                for item in items:
+                    title = item.get("title", "").strip()
+                    item_id = item.get("id", "")
+                    url = item.get("url", "") or (f"https://www.gate.io/announcements/article/{item_id}" if item_id else "")
+                    if title:
+                        results.append({"title": title, "url": url, "source": source_label})
+                if results:
+                    continue  # Pokračujeme s dalšími kategoriemi
+            except Exception as e:
+                log.warning("Gate.io API parse error (category=%s): %s", category, e)
+
+    if results:
+        return _dedup(results)[:40]
+
+    # Pokus 2: Gate.io web API (alternativní endpoint)
+    for api_url in [
+        "https://www.gate.io/apiw/article/list",
+        "https://www.gate.io/api/web/article/list",
+    ]:
+        resp = _get(api_url, use_json=True, params={"page": 1, "pageSize": 20})
+        if resp:
+            try:
+                data = resp.json()
+                items = data.get("data", data.get("list", []))
+                if isinstance(items, list) and items:
+                    for item in items:
+                        title = item.get("title", "").strip()
+                        item_id = item.get("id", "")
+                        url = item.get("url", "") or (f"https://www.gate.io/announcements/article/{item_id}" if item_id else "")
+                        if title:
+                            results.append({"title": title, "url": url, "source": "Gate"})
+                    return _dedup(results)[:20]
+            except Exception as e:
+                log.warning("Gate.io web API parse error (%s): %s", api_url, e)
+
+    return results
+
+
+# ─── COINBASE ─────────────────────────────────────────────────────────────────
+
+def scrape_coinbase() -> list[dict]:
+    """
+    Coinbase blog — Medium RSS feed (blog.coinbase.com/feed).
+    Coinbase nemá veřejné JSON API pro blog články; Medium RSS je nejspolehlivější zdroj.
+    Fallback: www.coinbase.com/blog/rss
+    """
+    for rss_url in [
+        "https://blog.coinbase.com/feed",
+        "https://www.coinbase.com/blog/landing/rss",
+    ]:
+        resp = _get(rss_url)
+        if not resp:
+            continue
+        try:
+            root = ET.fromstring(resp.text)
+            # RSS 2.0 struktura: rss > channel > item
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            items = root.findall(".//item")
+            results = []
+            for item in items[:20]:
+                title_el = item.find("title")
+                link_el = item.find("link")
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                url = link_el.text.strip() if link_el is not None and link_el.text else ""
+                if title and len(title) >= 10:
+                    results.append({"title": title, "url": url, "source": "Coinbase"})
+            if results:
+                log.info("Coinbase RSS (%s) → %d článků", rss_url, len(results))
+                return results
+        except ET.ParseError as e:
+            log.warning("Coinbase RSS parse error (%s): %s", rss_url, e)
+        except Exception as e:
+            log.warning("Coinbase RSS error (%s): %s", rss_url, e)
+
+    return []
 
 
 # ─── HLAVNÍ FUNKCE ────────────────────────────────────────────────────────────
@@ -327,12 +445,12 @@ _SCRAPERS = [
     scrape_binance,
     scrape_bybit,
     scrape_kraken,
-    scrape_coinbase,
-    scrape_okx,
     scrape_kucoin,
-    scrape_gate,
     scrape_htx,
     scrape_cryptocom,
+    scrape_okx,
+    scrape_gate,
+    scrape_coinbase,
 ]
 
 
