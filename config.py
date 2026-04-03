@@ -82,52 +82,41 @@ KEYWORDS = [
 
 EXCHANGE_FEEDS = {
     # ── Kraken ───────────────────────────────────────────────────────────────
-    # POZOR: Migrace/delistingy jsou výhradně ve support centru, ne na blogu!
-    # Příklad: OM→MANTRA migrace (únor 2026) byla pouze na support.kraken.com
+    # Blog RSS funguje; support centrum (delistingy/migrace) pokrývá scraper_kraken().
     "Kraken":               "https://blog.kraken.com/feed",
-    "KrakenSupport":        "https://support.kraken.com/hc/en-us/categories/200187583-Announcements/articles.rss",
-
-    # ── Coinbase ─────────────────────────────────────────────────────────────
-    # help.coinbase.com používá Intercom (ne Zendesk) → RSS nedostupné.
-    # Delistingy a migrace jsou oznamovány na blogu i přes @CoinbaseAssets na X.
-    "Coinbase":             "https://www.coinbase.com/blog/landing/rss",
 
     # ── Binance ──────────────────────────────────────────────────────────────
-    # Hlavní announcement feed pokrývá vše; delisting kategorie (navId=161)
-    # filtruje pouze delistingy → méně šumu, rychlejší záchyt.
+    # Hlavní announcement feed + delisting kategorie (navId=161).
     "Binance":              "https://www.binance.com/en/support/announcement/rss",
     "BinanceDelisting":     "https://www.binance.com/en/support/announcement/rss?navId=161",
 
-    # ── OKX ──────────────────────────────────────────────────────────────────
-    # Help center RSS pokrývá celý support vč. sekce Delistings & migrations.
-    # Dedikovaná sekce: okx.com/help/section/announcements-delistings
-    "OKX":                  "https://www.okx.com/help-center/rss",
-
-    # ── Bybit ────────────────────────────────────────────────────────────────
-    # announcements.bybit.com JE přímo support/announcement centrum (ne blog).
-    # Pokrývá delistingy, maintenance, token migrace.
-    "Bybit":                "https://announcements.bybit.com/en-US/rss/",
-
-    # ── Crypto.com ───────────────────────────────────────────────────────────
-    # crypto.com/exchange/announcements/list nemá RSS.
-    # Obecný feed zachytí klíčová oznámení.
-    "CryptoCom":            "https://crypto.com/en/feed/rss",
-
     # ── KuCoin ───────────────────────────────────────────────────────────────
-    # Dva oddělené endpointy: news RSS a announcement RSS.
-    # Announcement RSS (~kucoin.com/announcement) pokrývá delistingy přímo.
+    # News RSS funguje; announcement centrum pokrývá scrape_kucoin() přes v3 API.
     "KuCoin":               "https://www.kucoin.com/rss/news?lang=en_US",
-    "KuCoinAnnouncement":   "https://www.kucoin.com/rss/announcement?lang=en_US",
 
-    # ── Gate.io ──────────────────────────────────────────────────────────────
-    # article/rss = obecné články; announcement/rss = gate.com announcement centrum.
-    # Delistingy na: gate.com/announcements/delisted
-    "Gate":                 "https://www.gate.io/article/rss",
-    "GateAnnouncement":     "https://www.gate.com/announcements/rss",
+    # Níže jsou RSS feedy které jsou blokovány Cloudflare/rate-limitingem.
+    # Data pro tyto burzy sbíráme přes JSON API scrapery v exchange_scraper.py.
+    # KrakenSupport  → scrape_kraken()      (Zendesk JSON API)
+    # Coinbase       → scrape_coinbase_help() (Zendesk JSON API) + blog.coinbase.com scraper
+    # OKX            → scrape_okx()          (SSR JSON embed)
+    # Bybit          → scrape_bybit()        (api2.bybit.com JSON API)
+    # CryptoCom      → scrape_cryptocom()    (api.crypto.com POST API)
+    # Gate           → scrape_gate()         (api.gate.io JSON API)
+    # HTX            → scrape_htx()          (huobiglobal.zendesk.com JSON API)
+    # KuCoinAnn      → scrape_kucoin()       (api.kucoin.com v3 API)
+    # GateAnn        → scrape_gate()         (api.gate.io JSON API)
+}
 
-    # ── HTX (Huobi) ──────────────────────────────────────────────────────────
-    # HTX je přejmenovaný Huobi; announcement centrum má vlastní RSS.
-    "HTX":                  "https://www.htx.com/support/en-us/rss/",
+# Veřejné Telegram kanály burz s announcement centry.
+# Scrapujeme přes https://t.me/s/{channel} (web preview, bez autentizace).
+# Pokud kanál neexistuje nebo se přejmenoval, scraper vrátí prázdný seznam.
+TELEGRAM_CHANNELS = {
+    "Bybit":      "BybitAnnouncements",
+    "OKX":        "OKXAnnouncements",
+    "Gate":       "GateioAnnouncements",
+    "CryptoCom":  "CryptoComChannel",
+    "HTX":        "HTXglobal",
+    "Coinbase":   "CoinbaseNewsletter",
 }
 
 # CoinMarketCap API key (volitelné – free tier stačí)
