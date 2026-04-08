@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
 health_check.py
-Ověří dostupnost všech zdrojů (RSS feedy, CryptoPanic API, CoinMarketCap, Telegram).
+Ověří dostupnost všech zdrojů (RSS feedy, JSON API scrapery, CryptoPanic, Telegram).
 Spouštěj ručně nebo automaticky před monitorem v GitHub Actions.
 
 Výstup:
   ✅ zdroj OK
   ❌ zdroj selhal     → workflow skončí s exit code 1  (povinný zdroj)
   ⚠️  zdroj selhal    → jen varování, workflow pokračuje (volitelný zdroj)
-  ⚠️  zdroj přeskočen → chybí API key (volitelné)
 
-Volitelné feedy (OPTIONAL_FEEDS) jsou exchange support/announcement centra,
-která mohou občas omezit přístup (rate-limit, Cloudflare). Jejich selhání
-nezablokuje monitor; hlavní feed dané burzy pokrývá stejná oznámení.
+Architektura zdrojů:
+  Povinné RSS feedy   → Binance, BinanceDelisting, Kraken blog, KuCoin news
+  Povinné scrapery    → Bybit, KuCoin, Gate, Binance (JSON API)
+  Volitelné scrapery  → Kraken support, HTX, OKX, CryptoCom, Coinbase help
+  Telegram kanály     → záloha pro burzy bez funkčního API (všechny volitelné)
+  API zdroje          → CryptoPanic (povinný), CoinMarketCap (volitelný)
 """
 
 import os
@@ -20,18 +22,24 @@ import sys
 import requests
 import feedparser
 
-# Přímý import aby health_check fungoval i bez nastavených env vars
 from config import EXCHANGE_FEEDS
-
-# Feedy, které jsou "volitelné" — jejich selhání nevyhodí exit(1).
-# Jsou to převážně kategorie-specifické nebo sekundární support RSS feedy,
-# které mohou mít přísnější rate-limiting nebo Cloudflare ochranu.
-OPTIONAL_FEEDS = {
-    "BinanceDelisting",   # kategorie navId=161 — záloha k hlavnímu Binance feedu
-    "KuCoinAnnouncement", # announcement centrum — záloha k hlavnímu KuCoin feedu
-    "GateAnnouncement",   # gate.com announcement centrum — záloha k Gate feedu
-    "HTX",                # Huobi/HTX — méně kritická burza
-}
+from exchange_scraper import (
+    scrape_binance,
+    scrape_bybit,
+    scrape_kraken,
+    scrape_kucoin,
+    scrape_htx,
+    scrape_cryptocom,
+    scrape_okx,
+    scrape_gate,
+    scrape_coinbase,
+    scrape_coinbase_help,
+    scrape_telegram_bybit,
+    scrape_telegram_okx,
+    scrape_telegram_gate,
+    scrape_telegram_cryptocom,
+    scrape_telegram_htx,
+)
 
 CRYPTOPANIC_API_KEY   = os.environ.get("CRYPTOPANIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN    = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -41,7 +49,7 @@ COINMARKETCAP_API_KEY = os.environ.get("COINMARKETCAP_API_KEY", "")
 
 def check_feed(name: str, url: str) -> bool:
     try:
-        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0; +https://github.com)"})
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0)"})
         resp.raise_for_status()
         feed = feedparser.parse(resp.text)
         entry_count = len(feed.entries)
@@ -58,6 +66,28 @@ def check_feed(name: str, url: str) -> bool:
         return False
     except Exception as e:
         print(f"  ❌ {name}: {e}")
+        return False
+
+
+def check_scraper(name: str, scraper_fn, *, optional: bool = False) -> bool:
+    """
+    Zavolá scraper funkci a ověří že vrátila alespoň 1 položku.
+    Scraper musí vrátit list[dict] s klíčem 'title'.
+    """
+    try:
+        items = scraper_fn()
+        count = len(items)
+        if count > 0:
+            sample = items[0].get("title", "")[:60]
+            print(f"  ✅ {name}: OK ({count} položek, např. \"{sample}...\")")
+            return True
+        else:
+            prefix = "⚠️ " if optional else "❌"
+            print(f"  {prefix} {name}: scraper vrátil 0 položek")
+            return False
+    except Exception as e:
+        prefix = "⚠️ " if optional else "❌"
+        print(f"  {prefix} {name}: {e}")
         return False
 
 
@@ -128,7 +158,7 @@ def check_coinmarketcap() -> bool | None:
 
 
 def send_telegram_alert(failed_feeds: list[str]):
-    """Pošle Telegram zprávu pokud jsou nefunkční feedy."""
+    """Pošle Telegram zprávu pokud jsou nefunkční zdroje."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     lines = ["⚠️ <b>Health Check – nefunkční zdroje</b>"]
@@ -153,23 +183,56 @@ def main():
     failed_names: list[str] = []
     required_results: list[bool] = []
 
-    # ── RSS Exchange feedy ────────────────────────────────────────
-    print("\n📡 RSS Exchange Feedy (povinné):")
+    # ── RSS feedy (jen ty které stále fungují) ───────────────────
+    print("\n📡 RSS Feedy (povinné):")
     for name, url in EXCHANGE_FEEDS.items():
-        if name in OPTIONAL_FEEDS:
-            continue
         ok = check_feed(name, url)
         required_results.append(ok)
         if not ok:
             failed_names.append(name)
 
-    print("\n📡 RSS Exchange Feedy (volitelné — selhání nevyhodí chybu):")
-    for name, url in EXCHANGE_FEEDS.items():
-        if name not in OPTIONAL_FEEDS:
-            continue
-        ok = check_feed(name, url)
+    # ── JSON API scrapery (primární zdroj dat) ───────────────────
+    print("\n🔌 JSON API Scrapery (povinné):")
+    mandatory_scrapers = [
+        ("Binance JSON API",  scrape_binance),
+        ("Bybit JSON API",    scrape_bybit),
+        ("KuCoin v3 API",     scrape_kucoin),
+        ("Gate.io JSON API",  scrape_gate),
+    ]
+    for name, fn in mandatory_scrapers:
+        ok = check_scraper(name, fn)
+        required_results.append(ok)
         if not ok:
-            print(f"     ↳ {name} selhal – volitelný feed, monitor pokračuje")
+            failed_names.append(name)
+
+    print("\n🔌 JSON API Scrapery (volitelné):")
+    optional_scrapers = [
+        ("Kraken Support Zendesk", scrape_kraken),
+        ("HTX Zendesk API",        scrape_htx),
+        ("OKX SSR JSON",           scrape_okx),
+        ("Crypto.com POST API",    scrape_cryptocom),
+        ("Coinbase blog RSS",      scrape_coinbase),
+        ("Coinbase Help Zendesk",  scrape_coinbase_help),
+    ]
+    for name, fn in optional_scrapers:
+        ok = check_scraper(name, fn, optional=True)
+        if not ok:
+            print(f"     ↳ {name} selhal – volitelný scraper, monitor pokračuje")
+            failed_names.append(f"{name} (volitelný)")
+
+    # ── Telegram kanály (záloha pro burzy bez API) ───────────────
+    print("\n📣 Telegram Kanály (volitelné zálohy):")
+    telegram_scrapers = [
+        ("Telegram/Bybit",     scrape_telegram_bybit),
+        ("Telegram/OKX",       scrape_telegram_okx),
+        ("Telegram/Gate",      scrape_telegram_gate),
+        ("Telegram/CryptoCom", scrape_telegram_cryptocom),
+        ("Telegram/HTX",       scrape_telegram_htx),
+    ]
+    for name, fn in telegram_scrapers:
+        ok = check_scraper(name, fn, optional=True)
+        if not ok:
+            print(f"     ↳ {name} selhal – Telegram záloha, monitor pokračuje")
             failed_names.append(f"{name} (volitelný)")
 
     # ── API zdroje ───────────────────────────────────────────────
@@ -180,8 +243,8 @@ def main():
         failed_names.append("CryptoPanic API")
     check_coinmarketcap()   # volitelné, neblokuje workflow
 
-    # ── Telegram ─────────────────────────────────────────────────
-    print("\n📬 Telegram:")
+    # ── Telegram bot ─────────────────────────────────────────────
+    print("\n📬 Telegram Bot:")
     tg_ok = check_telegram()
     required_results.append(tg_ok)
 
@@ -192,14 +255,13 @@ def main():
     ok_count = total - failed
 
     if failed:
-        print(f"  ❌ SELHALO {failed}/{total} zdrojů – zkontroluj výstup výše")
+        print(f"  ❌ SELHALO {failed}/{total} povinných zdrojů – zkontroluj výstup výše")
         print("=" * 60)
-        # Pošli Telegram alert o nefunkčních feedech (pokud Telegram funguje)
         if tg_ok and failed_names:
             send_telegram_alert(failed_names)
         sys.exit(1)
     else:
-        print(f"  ✅ Všechny zdroje fungují ({ok_count}/{total})")
+        print(f"  ✅ Všechny povinné zdroje fungují ({ok_count}/{total})")
         print("=" * 60)
 
 

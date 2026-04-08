@@ -11,7 +11,9 @@ Strategie pro každou burzu:
   Crypto.com   → veřejné POST API (api.crypto.com/v1/public/get-announcements)
   OKX          → SSR JSON embed v HTML stránce (script[data-id=__app_data_for_ssr__])
   Gate.io      → interní JSON API (api.gate.io/articlelist)
-  Coinbase     → Medium RSS feed (blog.coinbase.com/feed) + fallback HTML
+  Coinbase     → Zendesk JSON API (help.coinbase.com) + Medium blog RSS
+  Telegram     → web preview t.me/s/{channel} pro burzy bez API
+                 (Bybit, OKX, Gate, CryptoCom, HTX, Coinbase)
 """
 
 import json
@@ -417,8 +419,6 @@ def scrape_coinbase() -> list[dict]:
             continue
         try:
             root = ET.fromstring(resp.text)
-            # RSS 2.0 struktura: rss > channel > item
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
             items = root.findall(".//item")
             results = []
             for item in items[:20]:
@@ -439,9 +439,109 @@ def scrape_coinbase() -> list[dict]:
     return []
 
 
+def scrape_coinbase_help() -> list[dict]:
+    """
+    Coinbase Help Center — Zendesk JSON API.
+    help.coinbase.com běží na Zendesk; API vrací nejnovější articles.
+    Pokrývá delistingy a migrace které nejsou na blogu.
+    """
+    for url, params in [
+        # Obecné nejnovější články — zachytí announcements
+        (
+            "https://help.coinbase.com/api/v2/help_center/en-us/articles.json",
+            {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+        # Fallback: articles s labelem announcements
+        (
+            "https://help.coinbase.com/api/v2/help_center/en-us/articles.json",
+            {"label_names": "announcements", "sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+    ]:
+        resp = _get(url, use_json=True, params=params)
+        if not resp:
+            continue
+        try:
+            articles = resp.json().get("articles", [])
+            if not articles:
+                continue
+            return [
+                {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "CoinbaseHelp"}
+                for a in articles if a.get("title")
+            ]
+        except Exception as e:
+            log.error("Coinbase Help Zendesk parse error: %s", e)
+
+    return []
+
+
+# ─── TELEGRAM KANÁLY ──────────────────────────────────────────────────────────
+
+def _scrape_telegram_channel(channel: str, source: str) -> list[dict]:
+    """
+    Scrapuje veřejný Telegram kanál přes web preview (t.me/s/{channel}).
+    Nevyžaduje autentizaci — funguje pro libovolný veřejný kanál.
+    Vrátí posledních max. 20 zpráv jako list[dict].
+    """
+    url = f"https://t.me/s/{channel}"
+    resp = _get(url)
+    if not resp:
+        return []
+
+    # HTTP 200 ale přesměrování na login = kanál je privátní nebo neexistuje
+    if "tgme_page_photo" not in resp.text and "tgme_widget_message" not in resp.text:
+        log.warning("Telegram: kanál %s nenalezen nebo je privátní", channel)
+        return []
+
+    try:
+        soup = _soup(resp.text)
+        results = []
+        for msg in soup.select(".tgme_widget_message"):
+            text_el = msg.select_one(".tgme_widget_message_text")
+            link_el = msg.select_one("a.tgme_widget_message_date")
+            if not text_el:
+                continue
+            title = text_el.get_text(" ", strip=True)
+            # Zkrátíme na 300 znaků — zbytek je kontext který nepotřebujeme
+            title = title[:300].strip()
+            msg_url = link_el["href"] if link_el and link_el.get("href") else f"https://t.me/{channel}"
+            if title and len(title) >= 10:
+                results.append({"title": title, "url": msg_url, "source": source})
+        # Telegram vrací zprávy od nejstarší; chceme nejnovější
+        return list(reversed(results))[:20]
+    except Exception as e:
+        log.error("Telegram scrape error (%s): %s", channel, e)
+        return []
+
+
+def scrape_telegram_bybit() -> list[dict]:
+    """Bybit officiální announcement kanál na Telegramu."""
+    return _scrape_telegram_channel("BybitAnnouncements", "Bybit")
+
+
+def scrape_telegram_okx() -> list[dict]:
+    """OKX officiální announcement kanál na Telegramu."""
+    return _scrape_telegram_channel("OKXAnnouncements", "OKX")
+
+
+def scrape_telegram_gate() -> list[dict]:
+    """Gate.io officiální announcement kanál na Telegramu."""
+    return _scrape_telegram_channel("GateioAnnouncements", "Gate")
+
+
+def scrape_telegram_cryptocom() -> list[dict]:
+    """Crypto.com officiální kanál na Telegramu."""
+    return _scrape_telegram_channel("CryptoComChannel", "CryptoCom")
+
+
+def scrape_telegram_htx() -> list[dict]:
+    """HTX (Huobi) officiální kanál na Telegramu."""
+    return _scrape_telegram_channel("HTXglobal", "HTX")
+
+
 # ─── HLAVNÍ FUNKCE ────────────────────────────────────────────────────────────
 
 _SCRAPERS = [
+    # JSON API scrapery (primární, nejspolehlivější)
     scrape_binance,
     scrape_bybit,
     scrape_kraken,
@@ -450,7 +550,15 @@ _SCRAPERS = [
     scrape_cryptocom,
     scrape_okx,
     scrape_gate,
+    # Coinbase — blog RSS + help center Zendesk API
     scrape_coinbase,
+    scrape_coinbase_help,
+    # Telegram kanály (záloha pro burzy kde API selhává nebo chybí)
+    scrape_telegram_bybit,
+    scrape_telegram_okx,
+    scrape_telegram_gate,
+    scrape_telegram_cryptocom,
+    scrape_telegram_htx,
 ]
 
 
