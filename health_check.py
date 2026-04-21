@@ -157,14 +157,19 @@ def check_coinmarketcap() -> bool | None:
         return False
 
 
-def send_telegram_alert(failed_feeds: list[str]):
-    """Pošle Telegram zprávu pokud jsou nefunkční zdroje."""
+def send_telegram_alert(required_failed: list[str], optional_failed_count: int = 0):
+    """
+    Pošle Telegram zprávu pouze o selhání povinných zdrojů.
+    Volitelné zdroje se do Telegramu nezasílají — jejich selhání je v GitHub Actions logu.
+    """
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    lines = ["⚠️ <b>Health Check – nefunkční zdroje</b>"]
-    for name in failed_feeds:
+    lines = ["⚠️ <b>Health Check – nefunkční povinné zdroje</b>"]
+    for name in required_failed:
         lines.append(f"  ❌ {name}")
-    lines.append("\nMonitor běží, ale tato data dnes chybí. Zkontroluj GitHub Actions log.")
+    if optional_failed_count > 0:
+        lines.append(f"\n<i>+ {optional_failed_count} volitelných zdrojů selhalo (viz GitHub Actions log)</i>")
+    lines.append("\nZkontroluj GitHub Actions log.")
     try:
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -180,7 +185,8 @@ def main():
     print("  CRYPTO MONITOR — HEALTH CHECK")
     print("=" * 60)
 
-    failed_names: list[str] = []
+    required_failed: list[str] = []   # povinné — blokují workflow + Telegram alert
+    optional_failed: list[str] = []   # volitelné — jen stdout log, bez Telegramu
     required_results: list[bool] = []
 
     # ── RSS feedy (jen ty které stále fungují) ───────────────────
@@ -189,24 +195,26 @@ def main():
         ok = check_feed(name, url)
         required_results.append(ok)
         if not ok:
-            failed_names.append(name)
+            required_failed.append(name)
 
     # ── JSON API scrapery (primární zdroj dat) ───────────────────
     print("\n🔌 JSON API Scrapery (povinné):")
     mandatory_scrapers = [
-        ("Binance JSON API",  scrape_binance),
-        ("Bybit JSON API",    scrape_bybit),
-        ("KuCoin v3 API",     scrape_kucoin),
-        ("Gate.io JSON API",  scrape_gate),
+        ("Binance JSON API", scrape_binance),
+        ("KuCoin v3 API",    scrape_kucoin),
     ]
     for name, fn in mandatory_scrapers:
         ok = check_scraper(name, fn)
         required_results.append(ok)
         if not ok:
-            failed_names.append(name)
+            required_failed.append(name)
 
+    # Bybit a Gate.io jsou volitelné — jejich API je blokováno Cloudflare
+    # z GitHub Actions IP; data sbíráme přes Telegram kanály jako zálohu.
     print("\n🔌 JSON API Scrapery (volitelné):")
     optional_scrapers = [
+        ("Bybit JSON API",         scrape_bybit),
+        ("Gate.io JSON API",       scrape_gate),
         ("Kraken Support Zendesk", scrape_kraken),
         ("HTX Zendesk API",        scrape_htx),
         ("OKX SSR JSON",           scrape_okx),
@@ -218,29 +226,29 @@ def main():
         ok = check_scraper(name, fn, optional=True)
         if not ok:
             print(f"     ↳ {name} selhal – volitelný scraper, monitor pokračuje")
-            failed_names.append(f"{name} (volitelný)")
+            optional_failed.append(name)
 
     # ── Telegram kanály (záloha pro burzy bez API) ───────────────
+    # Gate a HTX vynecháme z health checku — kanály jsou nestabilní / přejmenované.
+    # Scraper je stále zkouší, ale selhání nehlásíme do Telegramu.
     print("\n📣 Telegram Kanály (volitelné zálohy):")
     telegram_scrapers = [
         ("Telegram/Bybit",     scrape_telegram_bybit),
         ("Telegram/OKX",       scrape_telegram_okx),
-        ("Telegram/Gate",      scrape_telegram_gate),
         ("Telegram/CryptoCom", scrape_telegram_cryptocom),
-        ("Telegram/HTX",       scrape_telegram_htx),
     ]
     for name, fn in telegram_scrapers:
         ok = check_scraper(name, fn, optional=True)
         if not ok:
             print(f"     ↳ {name} selhal – Telegram záloha, monitor pokračuje")
-            failed_names.append(f"{name} (volitelný)")
+            optional_failed.append(name)
 
     # ── API zdroje ───────────────────────────────────────────────
     print("\n🔑 API Zdroje:")
     cp_ok = check_cryptopanic()
     required_results.append(cp_ok)
     if not cp_ok:
-        failed_names.append("CryptoPanic API")
+        required_failed.append("CryptoPanic API")
     check_coinmarketcap()   # volitelné, neblokuje workflow
 
     # ── Telegram bot ─────────────────────────────────────────────
@@ -250,6 +258,9 @@ def main():
 
     # ── Výsledek ─────────────────────────────────────────────────
     print("\n" + "=" * 60)
+    if optional_failed:
+        print(f"  ⚠️  {len(optional_failed)} volitelných zdrojů selhalo: {', '.join(optional_failed)}")
+
     failed = sum(1 for r in required_results if r is False)
     total  = len(required_results)
     ok_count = total - failed
@@ -257,8 +268,8 @@ def main():
     if failed:
         print(f"  ❌ SELHALO {failed}/{total} povinných zdrojů – zkontroluj výstup výše")
         print("=" * 60)
-        if tg_ok and failed_names:
-            send_telegram_alert(failed_names)
+        if tg_ok and required_failed:
+            send_telegram_alert(required_failed, len(optional_failed))
         sys.exit(1)
     else:
         print(f"  ✅ Všechny povinné zdroje fungují ({ok_count}/{total})")
