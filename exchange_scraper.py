@@ -126,26 +126,31 @@ def scrape_binance() -> list[dict]:
 # ─── BYBIT ────────────────────────────────────────────────────────────────────
 
 def scrape_bybit() -> list[dict]:
-    """Bybit JSON API — announcement centrum."""
-    resp = _get(
+    """Bybit v5 REST API — announcement centrum."""
+    for base_url in [
+        "https://api.bybit.com/v5/announcements/index",
         "https://api2.bybit.com/v2/announcements/index",
-        use_json=True,
-        params={"locale": "en-US", "page": 1, "limit": 20},
-    )
-    if not resp:
-        return []
-    try:
-        items = resp.json().get("result", {}).get("list", [])
-        results = []
-        for item in items:
-            title = item.get("title", "").strip()
-            url = item.get("url", "") or f"https://announcements.bybit.com/en-US/{item.get('id', '')}"
-            if title:
-                results.append({"title": title, "url": url, "source": "Bybit"})
-        return results
-    except Exception as e:
-        log.error("Bybit JSON parse error: %s", e)
-        return []
+    ]:
+        resp = _get(base_url, use_json=True, params={"locale": "en-US", "page": 1, "limit": 20})
+        if not resp:
+            continue
+        try:
+            data = resp.json()
+            # v5 API používá retCode=0 pro úspěch
+            if "retCode" in data and data["retCode"] != 0:
+                continue
+            items = data.get("result", {}).get("list", [])
+            results = []
+            for item in items:
+                title = item.get("title", "").strip()
+                url = item.get("url", "") or f"https://announcements.bybit.com/en-US/?id={item.get('id', '')}"
+                if title:
+                    results.append({"title": title, "url": url, "source": "Bybit"})
+            if results:
+                return results
+        except Exception as e:
+            log.error("Bybit JSON parse error (%s): %s", base_url, e)
+    return []
 
 
 # ─── KRAKEN ───────────────────────────────────────────────────────────────────
@@ -217,15 +222,20 @@ def scrape_kucoin() -> list[dict]:
 
 def scrape_htx() -> list[dict]:
     """
-    HTX support centrum běží na Zendesk (huobiglobal.zendesk.com).
-    Stahujeme nejnovější články ze sekce oznámení.
+    HTX support centrum běží na Zendesk.
+    HTX (dříve Huobi) přejmenoval Zendesk z huobiglobal na htxglobal.
     """
-    # Zkusíme nejprve specifickou sekci oznámení (section_id z HTX URL vzorů)
     for url, params in [
+        # Nový HTX Zendesk (po rebrandingu z Huobi → HTX v 2023)
         (
-            "https://huobiglobal.zendesk.com/api/v2/help_center/en-us/sections/360000070201/articles.json",
+            "https://htxglobal.zendesk.com/api/v2/help_center/en-us/articles.json",
             {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
         ),
+        (
+            "https://htxglobal.zendesk.com/api/v2/help_center/en-us/sections/360000070201/articles.json",
+            {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+        # Starý Huobi Zendesk jako fallback
         (
             "https://huobiglobal.zendesk.com/api/v2/help_center/en-us/articles.json",
             {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
@@ -344,7 +354,8 @@ def scrape_okx() -> list[dict]:
 def scrape_gate() -> list[dict]:
     """
     Gate.io interní JSON API pro články/oznámení.
-    Primárně zkusíme api.gate.io/articlelist; fallback na web API.
+    Pokus 1: api.gate.io/articlelist; Pokus 2: web API fallbacky;
+    Pokus 3: Medium RSS (gate-io blog, není za Cloudflare).
     """
     results = []
 
@@ -358,7 +369,6 @@ def scrape_gate() -> list[dict]:
         if resp:
             try:
                 data = resp.json()
-                # Zkusíme různé struktury odpovědi
                 items = []
                 if isinstance(data, list):
                     items = data
@@ -371,14 +381,14 @@ def scrape_gate() -> list[dict]:
                     if title:
                         results.append({"title": title, "url": url, "source": source_label})
                 if results:
-                    continue  # Pokračujeme s dalšími kategoriemi
+                    continue
             except Exception as e:
                 log.warning("Gate.io API parse error (category=%s): %s", category, e)
 
     if results:
         return _dedup(results)[:40]
 
-    # Pokus 2: Gate.io web API (alternativní endpoint)
+    # Pokus 2: Gate.io web API (alternativní endpointy)
     for api_url in [
         "https://www.gate.io/apiw/article/list",
         "https://www.gate.io/api/web/article/list",
@@ -398,6 +408,32 @@ def scrape_gate() -> list[dict]:
                     return _dedup(results)[:20]
             except Exception as e:
                 log.warning("Gate.io web API parse error (%s): %s", api_url, e)
+
+    # Pokus 3: Medium RSS pro gate-io blog (není za Gate.io Cloudflare)
+    for medium_url in [
+        "https://medium.com/feed/gate-io",
+        "https://gateio.medium.com/feed",
+    ]:
+        resp = _get(medium_url)
+        if not resp:
+            continue
+        try:
+            root = ET.fromstring(resp.text)
+            items = root.findall(".//item")
+            for item in items[:20]:
+                title_el = item.find("title")
+                link_el = item.find("link")
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                url = link_el.text.strip() if link_el is not None and link_el.text else ""
+                if title and len(title) >= 10:
+                    results.append({"title": title, "url": url, "source": "Gate"})
+            if results:
+                log.info("Gate.io Medium RSS (%s) → %d článků", medium_url, len(results))
+                return results
+        except ET.ParseError as e:
+            log.warning("Gate.io Medium RSS parse error (%s): %s", medium_url, e)
+        except Exception as e:
+            log.warning("Gate.io Medium RSS error (%s): %s", medium_url, e)
 
     return results
 
@@ -525,7 +561,11 @@ def scrape_telegram_okx() -> list[dict]:
 
 def scrape_telegram_gate() -> list[dict]:
     """Gate.io officiální announcement kanál na Telegramu."""
-    return _scrape_telegram_channel("GateioAnnouncements", "Gate")
+    for channel in ["GateioAnnouncements", "gate_io", "GateAnnouncements"]:
+        result = _scrape_telegram_channel(channel, "Gate")
+        if result:
+            return result
+    return []
 
 
 def scrape_telegram_cryptocom() -> list[dict]:
@@ -534,8 +574,12 @@ def scrape_telegram_cryptocom() -> list[dict]:
 
 
 def scrape_telegram_htx() -> list[dict]:
-    """HTX (Huobi) officiální kanál na Telegramu."""
-    return _scrape_telegram_channel("HTXglobal", "HTX")
+    """HTX (přejmenovaný z Huobi) officiální kanál na Telegramu."""
+    for channel in ["HTXglobal", "HTX_Global", "HTX_Official"]:
+        result = _scrape_telegram_channel(channel, "HTX")
+        if result:
+            return result
+    return []
 
 
 # ─── HLAVNÍ FUNKCE ────────────────────────────────────────────────────────────

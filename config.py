@@ -113,8 +113,10 @@ EXCHANGE_FEEDS = {
 TELEGRAM_CHANNELS = {
     "Bybit":      "BybitAnnouncements",
     "OKX":        "OKXAnnouncements",
+    # Gate.io: zkouší GateioAnnouncements → gate_io → GateAnnouncements (viz scrape_telegram_gate)
     "Gate":       "GateioAnnouncements",
     "CryptoCom":  "CryptoComChannel",
+    # HTX: zkouší HTXglobal → HTX_Global → HTX_Official (viz scrape_telegram_htx)
     "HTX":        "HTXglobal",
     "Coinbase":   "CoinbaseNewsletter",
 }
