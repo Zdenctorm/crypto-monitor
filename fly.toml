@@ -1,0 +1,13 @@
+# Fly.io konfigurace — region Frankfurt (EU)
+app = "crypto-monitor"
+primary_region = "fra"
+
+[build]
+
+[mounts]
+  source = "monitor_data"
+  destination = "/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

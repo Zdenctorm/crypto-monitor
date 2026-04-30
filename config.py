@@ -129,6 +129,6 @@ TELEGRAM_CHANNELS = {
 # CoinMarketCap API key (volitelné – free tier stačí)
 COINMARKETCAP_API_KEY = os.environ.get("COINMARKETCAP_API_KEY", "")
 
-# Kde ukládat stav a logy
-STATE_FILE = "monitor_state.json"
-LOG_FILE   = "monitor.log"
+# Kde ukládat stav a logy — lze přepsat env proměnnou (Fly.io volume: /data)
+STATE_FILE = os.environ.get("STATE_FILE", "monitor_state.json")
+LOG_FILE   = os.environ.get("LOG_FILE",   "monitor.log")
