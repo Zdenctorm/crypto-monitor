@@ -6,6 +6,11 @@ CRYPTOPANIC_API_KEY  = os.environ.get("CRYPTOPANIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID     = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+LINEAR_API_KEY       = os.environ.get("LINEAR_API_KEY", "")
+# Ops team + zdenal (Zdeněk Mareček) — pevné hodnoty, nemění se
+LINEAR_TEAM_ID       = "33cf2dd4-689b-4707-88b2-5f4263846bea"
+LINEAR_ASSIGNEE_ID   = "2b21c6af-3ee9-4519-bb70-6e3341d891c9"
+
 # Tokeny ze seznamu (Kraken Europe listing)
 TOKENS = [
     "1INCH","AAVE","ACA","ACH","ACT","ACX","ADA","ADX","AERO","AEVO","AGLD","AI16Z",

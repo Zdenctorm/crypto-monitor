@@ -21,6 +21,7 @@ from config import (
     EXCHANGE_FEEDS, STATE_FILE, LOG_FILE,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     COINMARKETCAP_API_KEY,
+    LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_ASSIGNEE_ID,
 )
 from currency_contracts import TOKEN_CONTRACTS
 from exchange_scraper import fetch_all_scrapers
@@ -183,6 +184,74 @@ def _send_telegram_summary(all_alerts: list[dict]):
             current += line + "\n"
     if current.strip():
         send_telegram(current)
+
+
+# ── LINEAR ───────────────────────────────────────────────────────────────────
+
+_LINEAR_URL = "https://api.linear.app/graphql"
+
+_LINEAR_MUTATION = """
+mutation CreateIssue($title: String!, $teamId: String!, $assigneeId: String!,
+                     $description: String, $priority: Int) {
+  issueCreate(input: {
+    title: $title
+    teamId: $teamId
+    assigneeId: $assigneeId
+    description: $description
+    priority: $priority
+  }) {
+    success
+    issue { identifier url }
+  }
+}
+"""
+
+
+def send_linear_issue(alert: dict):
+    """Vytvoří Linear issue v Ops teamu, přiřazené zdenalovi."""
+    if not LINEAR_API_KEY:
+        return
+
+    tokens_str = ", ".join(alert["tokens"]) if alert["tokens"] else "GENERAL"
+    icon = _priority_icon(alert.get("reason", ""))
+    title = f"{icon} [{tokens_str}] {alert['reason'].capitalize()} — {alert['source']}"
+
+    desc_lines = [
+        f"**Token(y):** {tokens_str}",
+        f"**Zdroj:** {alert['source']}",
+        f"**Důvod:** {alert['reason']}",
+        "",
+        alert["title"],
+    ]
+    if alert.get("url"):
+        desc_lines.append(f"\n[Odkaz na oznámení]({alert['url']})")
+
+    try:
+        resp = requests.post(
+            _LINEAR_URL,
+            json={
+                "query": _LINEAR_MUTATION,
+                "variables": {
+                    "title": title,
+                    "teamId": LINEAR_TEAM_ID,
+                    "assigneeId": LINEAR_ASSIGNEE_ID,
+                    "description": "\n".join(desc_lines),
+                    "priority": _priority_order(alert),  # 0=urgent,1=high,2=normal
+                },
+            },
+            headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        issue = data.get("data", {}).get("issueCreate", {}).get("issue", {})
+        if issue:
+            log.info("Linear issue: %s %s", issue.get("identifier"), issue.get("url"))
+        else:
+            errors = data.get("errors")
+            log.error("Linear issue create failed: %s", errors)
+    except Exception as e:
+        log.error("Linear API error: %s", e)
 
 
 # ── CRYPTOPANIC ───────────────────────────────────────────────────────────────
@@ -559,6 +628,14 @@ def main():
 
     # Telegram: 1 souhrnná zpráva (nebo série zpráv po max 4000 znacích)
     _send_telegram_summary(all_alerts)
+
+    # Linear: 1 issue per alert (Ops team, assignee: zdenal)
+    if LINEAR_API_KEY:
+        for a in all_alerts:
+            send_linear_issue(a)
+            time.sleep(0.3)
+    else:
+        log.info("Linear přeskočen (LINEAR_API_KEY není nastaven)")
 
     # Uložit stav — seřadíme pro deterministické oříznutí na 5000 posledních
     new_ids = [a["uid"] for a in all_alerts]
