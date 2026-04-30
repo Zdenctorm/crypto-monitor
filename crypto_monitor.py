@@ -25,9 +25,11 @@ from config import (
 from currency_contracts import TOKEN_CONTRACTS
 from exchange_scraper import fetch_all_scrapers
 
-# Precompilované regex patterny pro tokeny — sestaví se jednou při startu modulu
+# Precompilované regex patterny pro tokeny — sestaví se jednou při startu modulu.
+# CASE-SENSITIVE: tickery jsou vždy UPPERCASE, ale slova jako "token", "not", "cloud"
+# jsou lowercase → re.IGNORECASE by způsobovalo masivní false positives.
 _TOKEN_PATTERNS: dict[str, re.Pattern] = {
-    token: re.compile(rf'\b{re.escape(token)}\b', re.IGNORECASE)
+    token: re.compile(rf'\b{re.escape(token)}\b')
     for token in TOKENS
 }
 
@@ -534,6 +536,19 @@ def main():
         all_alerts.extend(cmc_alerts)
     else:
         log.info("CoinMarketCap přeskočen (API key není nastaven)")
+
+    # Deduplikace cross-source: stejný článek z RSS i JSON API scraperu má jiné URL
+    # ale stejný titulek → normalizujeme titulek a zachováme jen první výskyt.
+    seen_titles: set[str] = set()
+    deduped: list[dict] = []
+    for a in all_alerts:
+        key = re.sub(r'\s+', ' ', a["title"].strip().lower())
+        if key not in seen_titles:
+            seen_titles.add(key)
+            deduped.append(a)
+    if len(deduped) < len(all_alerts):
+        log.info("Cross-source dedup: %d → %d alertů", len(all_alerts), len(deduped))
+    all_alerts = deduped
 
     # Logovat každý alert do souboru
     for a in all_alerts:

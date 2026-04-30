@@ -592,8 +592,9 @@ def _scrape_telegram_channel(channel: str, source: str) -> list[dict]:
             if not text_el:
                 continue
             title = text_el.get_text(" ", strip=True)
-            # Zkrátíme na 300 znaků — zbytek je kontext který nepotřebujeme
-            title = title[:300].strip()
+            # Zkrátíme na 200 znaků — delší texty jsou reklamy/DCA funkce a
+            # obsahovaly by falešné ticker shody (např. "SOL" v seznamu coinů)
+            title = title[:200].strip()
             msg_url = link_el["href"] if link_el and link_el.get("href") else f"https://t.me/{channel}"
             if title and len(title) >= 10:
                 results.append({"title": title, "url": msg_url, "source": source})

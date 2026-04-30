@@ -68,11 +68,10 @@ def first_keyword(text: str) -> str:
 
 
 def find_tokens(text: str) -> list[str]:
-    """Najde sledované tokeny v textu pomocí word-boundary regex."""
+    """Najde sledované tokeny v textu — case-sensitive, tickery jsou UPPERCASE."""
     found = []
-    upper = text.upper()
     for token in TOKENS_SET:
-        if re.search(rf'\b{re.escape(token)}\b', upper):
+        if re.search(rf'\b{re.escape(token)}\b', text):
             found.append(token)
     return found
 
