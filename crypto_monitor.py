@@ -207,24 +207,28 @@ mutation CreateIssue($title: String!, $teamId: String!, $assigneeId: String!,
 """
 
 
-def send_linear_issue(alert: dict):
-    """Vytvoří Linear issue v Ops teamu, přiřazené zdenalovi."""
-    if not LINEAR_API_KEY:
+def send_linear_issue(all_alerts: list[dict]):
+    """Vytvoří 1 souhrnné Linear issue v Ops teamu, přiřazené zdenalovi."""
+    if not all_alerts:
         return
 
-    tokens_str = ", ".join(alert["tokens"]) if alert["tokens"] else "GENERAL"
-    icon = _priority_icon(alert.get("reason", ""))
-    title = f"{icon} [{tokens_str}] {alert['reason'].capitalize()} — {alert['source']}"
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Priorita = nejvyšší z alertů (nejnižší číslo = nejvyšší priorita)
+    top_priority = min(_priority_order(a) for a in all_alerts)
+    tokens_all = sorted({t for a in all_alerts for t in (a["tokens"] or ["GENERAL"])})
+    title = f"Crypto Monitor {date_str} — {len(all_alerts)} alertů [{', '.join(tokens_all[:5])}{'...' if len(tokens_all) > 5 else ''}]"
 
-    desc_lines = [
-        f"**Token(y):** {tokens_str}",
-        f"**Zdroj:** {alert['source']}",
-        f"**Důvod:** {alert['reason']}",
-        "",
-        alert["title"],
-    ]
-    if alert.get("url"):
-        desc_lines.append(f"\n[Odkaz na oznámení]({alert['url']})")
+    # Sestav popis: seřazeno podle závažnosti
+    sorted_alerts = sorted(all_alerts, key=_priority_order)
+    desc_lines = [f"## Crypto Monitor — {date_str}\n"]
+    for a in sorted_alerts:
+        icon = _priority_icon(a.get("reason", ""))
+        tokens_str = ", ".join(a["tokens"]) if a["tokens"] else "GENERAL"
+        desc_lines.append(f"{icon} **[{tokens_str}]** {a['reason']} — {a['source']}")
+        desc_lines.append(f"{a['title']}")
+        if a.get("url"):
+            desc_lines.append(f"[Odkaz]({a['url']})")
+        desc_lines.append("")
 
     try:
         resp = requests.post(
@@ -236,7 +240,7 @@ def send_linear_issue(alert: dict):
                     "teamId": LINEAR_TEAM_ID,
                     "assigneeId": LINEAR_ASSIGNEE_ID,
                     "description": "\n".join(desc_lines),
-                    "priority": _priority_order(alert),  # 0=urgent,1=high,2=normal
+                    "priority": top_priority,
                 },
             },
             headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
@@ -248,8 +252,7 @@ def send_linear_issue(alert: dict):
         if issue:
             log.info("Linear issue: %s %s", issue.get("identifier"), issue.get("url"))
         else:
-            errors = data.get("errors")
-            log.error("Linear issue create failed: %s", errors)
+            log.error("Linear issue create failed: %s", data.get("errors"))
     except Exception as e:
         log.error("Linear API error: %s", e)
 
@@ -629,11 +632,9 @@ def main():
     # Telegram: 1 souhrnná zpráva (nebo série zpráv po max 4000 znacích)
     _send_telegram_summary(all_alerts)
 
-    # Linear: 1 issue per alert (Ops team, assignee: zdenal)
+    # Linear: 1 souhrnné issue za run (Ops team, assignee: zdenal)
     if LINEAR_API_KEY:
-        for a in all_alerts:
-            send_linear_issue(a)
-            time.sleep(0.3)
+        send_linear_issue(all_alerts)
     else:
         log.info("Linear přeskočen (LINEAR_API_KEY není nastaven)")
 
