@@ -32,6 +32,7 @@ from exchange_scraper import (
     scrape_cryptocom,
     scrape_okx,
     scrape_gate,
+    scrape_mexc,
     scrape_coinbase,
     scrape_coinbase_help,
     scrape_telegram_bybit,
@@ -219,6 +220,7 @@ def main():
         ("HTX Zendesk API",        scrape_htx),
         ("OKX SSR JSON",           scrape_okx),
         ("Crypto.com POST API",    scrape_cryptocom),
+        ("MEXC Zendesk/API",       scrape_mexc),
         ("Coinbase blog RSS",      scrape_coinbase),
         ("Coinbase Help Zendesk",  scrape_coinbase_help),
     ]
