@@ -17,8 +17,8 @@ import requests
 import feedparser
 
 from config import (
-    CRYPTOPANIC_API_KEY, TOKENS, KEYWORDS,
-    EXCHANGE_FEEDS, STATE_FILE, LOG_FILE,
+    TOKENS, KEYWORDS,
+    EXCHANGE_FEEDS, NEWS_FEEDS, STATE_FILE, LOG_FILE,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     COINMARKETCAP_API_KEY,
     LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_ASSIGNEE_ID,
@@ -257,73 +257,7 @@ def send_linear_issue(all_alerts: list[dict]):
         log.error("Linear API error: %s", e)
 
 
-# ── CRYPTOPANIC ───────────────────────────────────────────────────────────────
-
-CRYPTOPANIC_URL = "https://cryptopanic.com/api/developer/v2/posts/"
-
-def fetch_cryptopanic(seen_ids: set) -> list[dict]:
-    """
-    Stahuje zprávy z CryptoPanic pro všechny tokeny.
-    Filtruje na klíčová slova a vrací nové položky.
-    """
-    alerts = []
-    # API bere max ~50 currencies najednou — rozdělíme do dávek
-    batch_size = 50
-    token_list = list(TOKENS)
-
-    for i in range(0, len(token_list), batch_size):
-        batch = token_list[i:i + batch_size]
-        currencies = ",".join(batch)
-        params = {
-            "auth_token": CRYPTOPANIC_API_KEY,
-            "currencies": currencies,
-            "filter": "important",   # hot/important zprávy
-            "public": "true",
-        }
-        try:
-            resp = requests.get(CRYPTOPANIC_URL, params=params, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            log.error("CryptoPanic fetch error (batch %d): %s", i // batch_size, e)
-            time.sleep(2)
-            continue
-
-        for post in data.get("results", []):
-            title = post.get("title", "")
-            url   = post.get("url", "")
-            uid   = item_id(url or title)
-
-            if uid in seen_ids:
-                continue
-
-            # Kontrola klíčových slov
-            if not contains_keyword(title):
-                continue
-
-            tokens_found = token_in_text(title)
-            # Doplníme z currencies tagu pokud regex nic nenašel
-            if not tokens_found:
-                for c in post.get("currencies", []):
-                    sym = c.get("code", "")
-                    if sym in TOKENS:
-                        tokens_found.append(sym)
-
-            alerts.append({
-                "source":  "CryptoPanic",
-                "title":   title,
-                "url":     url,
-                "tokens":  tokens_found,
-                "reason":  _extract_reason(title),
-                "uid":     uid,
-            })
-
-        time.sleep(1)  # rate limit
-
-    return alerts
-
-
-# ── EXCHANGE RSS FEEDS ────────────────────────────────────────────────────────
+# ── RSS FEEDS (burzy + zpravodajství) ────────────────────────────────────────
 
 def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
     alerts = []
@@ -359,6 +293,47 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
             alerts.append({
                 "source":  exchange,
+                "title":   title,
+                "url":     url,
+                "tokens":  tokens_found,
+                "reason":  _extract_reason(full),
+                "uid":     uid,
+            })
+
+    return alerts
+
+
+def fetch_news_feeds(seen_ids: set) -> list[dict]:
+    """CoinDesk, Decrypt, CoinTelegraph RSS — zachytí delistingy z médií."""
+    alerts = []
+    for source, feed_url in NEWS_FEEDS.items():
+        try:
+            feed = feedparser.parse(
+                feed_url,
+                request_headers={"User-Agent": "Mozilla/5.0 (compatible; crypto-monitor/1.0)"},
+            )
+        except Exception as e:
+            log.error("News feed error (%s): %s", source, e)
+            continue
+
+        for entry in feed.entries:
+            title   = entry.get("title", "")
+            url     = entry.get("link", "")
+            summary = entry.get("summary", "")
+            full    = f"{title} {summary}"
+            uid     = item_id(url or title)
+
+            if uid in seen_ids:
+                continue
+            if not contains_keyword(full):
+                continue
+
+            tokens_found = token_in_text(full)
+            if not tokens_found:
+                continue
+
+            alerts.append({
+                "source":  source,
                 "title":   title,
                 "url":     url,
                 "tokens":  tokens_found,
@@ -582,23 +557,23 @@ def main():
 
     all_alerts = []
 
-    # 1) CryptoPanic
-    log.info("Fetching CryptoPanic...")
-    cp_alerts = fetch_cryptopanic(seen_ids)
-    log.info("  → %d nových alertů z CryptoPanic", len(cp_alerts))
-    all_alerts.extend(cp_alerts)
-
-    # 2) Exchange RSS feeds
+    # 1) Exchange RSS feeds (Binance, KuCoin, Kraken)
     log.info("Fetching exchange feeds (RSS)...")
     ex_alerts = fetch_exchange_feeds(seen_ids)
     log.info("  → %d nových alertů z exchange RSS feedů", len(ex_alerts))
     all_alerts.extend(ex_alerts)
 
-    # 3) Exchange Web Scraping (záloha za RSS + burzy bez RSS)
+    # 2) Exchange Web Scraping (Bybit, Gate, OKX, HTX atd.)
     log.info("Fetching exchange feeds (web scraping)...")
     scrape_alerts = fetch_exchange_scrapers(seen_ids)
     log.info("  → %d nových alertů z web scrapingu", len(scrape_alerts))
     all_alerts.extend(scrape_alerts)
+
+    # 3) Zpravodajské RSS feedy (CoinDesk, Decrypt, CoinTelegraph)
+    log.info("Fetching news feeds...")
+    news_alerts = fetch_news_feeds(seen_ids)
+    log.info("  → %d nových alertů ze zpravodajství", len(news_alerts))
+    all_alerts.extend(news_alerts)
 
     # 4) CoinMarketCap (volitelné)
     if COINMARKETCAP_API_KEY:

@@ -1,63 +1,27 @@
-name: Crypto Monitor
+name: Crypto Monitor (manuální záloha)
 
+# Cron job běží na Fly.io (Frankfurt EU).
+# Tento workflow slouží jen pro manuální spuštění z GitHub UI.
 on:
-  schedule:
-    - cron: "0 7 * * *"   # každý den v 8:00 CET (7:00 UTC)
-  workflow_dispatch:        # možnost spustit ručně z GitHub UI
+  workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
-      - name: Checkout repozitáře
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Nastav Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Instaluj závislosti
-        run: pip install requests feedparser beautifulsoup4
-
-      - name: Obnov stav monitoru z cache
-        uses: actions/cache/restore@v4
-        with:
-          path: monitor_state.json
-          key: monitor-state-${{ github.run_id }}
-          restore-keys: |
-            monitor-state-
-
-      - name: Health check – ověř dostupnost zdrojů (jen log, bez Telegram)
-        continue-on-error: true
-        env:
-          CRYPTOPANIC_API_KEY:   ${{ secrets.CRYPTOPANIC_API_KEY }}
-          COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
-        run: python health_check.py
+      - run: pip install requests feedparser beautifulsoup4
 
       - name: Spusť monitor
         env:
-          CRYPTOPANIC_API_KEY:   ${{ secrets.CRYPTOPANIC_API_KEY }}
           TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
           COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
           LINEAR_API_KEY:        ${{ secrets.LINEAR_API_KEY }}
         run: python crypto_monitor.py
-
-      - name: Ulož stav monitoru do cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: monitor_state.json
-          key: monitor-state-${{ github.run_id }}
-
-      - name: Ulož log jako artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: monitor-log-${{ github.run_id }}
-          path: monitor.log
-          retention-days: 30

@@ -87,29 +87,21 @@ KEYWORDS = [
 
 EXCHANGE_FEEDS = {
     # ── Kraken ───────────────────────────────────────────────────────────────
-    # Blog RSS funguje; support centrum (delistingy/migrace) pokrývá scraper_kraken().
     "Kraken":               "https://blog.kraken.com/feed",
 
     # ── Binance ──────────────────────────────────────────────────────────────
-    # Hlavní announcement feed + delisting kategorie (navId=161).
     "Binance":              "https://www.binance.com/en/support/announcement/rss",
     "BinanceDelisting":     "https://www.binance.com/en/support/announcement/rss?navId=161",
 
     # ── KuCoin ───────────────────────────────────────────────────────────────
-    # News RSS funguje; announcement centrum pokrývá scrape_kucoin() přes v3 API.
     "KuCoin":               "https://www.kucoin.com/rss/news?lang=en_US",
+}
 
-    # Níže jsou RSS feedy které jsou blokovány Cloudflare/rate-limitingem.
-    # Data pro tyto burzy sbíráme přes JSON API scrapery v exchange_scraper.py.
-    # KrakenSupport  → scrape_kraken()      (Zendesk JSON API)
-    # Coinbase       → scrape_coinbase_help() (Zendesk JSON API) + blog.coinbase.com scraper
-    # OKX            → scrape_okx()          (SSR JSON embed)
-    # Bybit          → scrape_bybit()        (api2.bybit.com JSON API)
-    # CryptoCom      → scrape_cryptocom()    (api.crypto.com POST API)
-    # Gate           → scrape_gate()         (api.gate.io JSON API)
-    # HTX            → scrape_htx()          (huobiglobal.zendesk.com JSON API)
-    # KuCoinAnn      → scrape_kucoin()       (api.kucoin.com v3 API)
-    # GateAnn        → scrape_gate()         (api.gate.io JSON API)
+# Zpravodajské RSS feedy — zachytí delistingy a migrace z médií
+NEWS_FEEDS = {
+    "CoinDesk":      "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "Decrypt":       "https://decrypt.co/feed",
+    "CoinTelegraph": "https://cointelegraph.com/rss",
 }
 
 # Veřejné Telegram kanály burz s announcement centry.
