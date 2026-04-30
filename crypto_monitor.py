@@ -7,6 +7,7 @@ Výstup: strukturovaný log soubor (Telegram later)
 
 import json
 import logging
+import re
 import time
 import hashlib
 from datetime import datetime, timezone
@@ -20,9 +21,18 @@ from config import (
     EXCHANGE_FEEDS, STATE_FILE, LOG_FILE,
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     COINMARKETCAP_API_KEY,
+    LINEAR_API_KEY, LINEAR_TEAM_ID, LINEAR_ASSIGNEE_ID,
 )
 from currency_contracts import TOKEN_CONTRACTS
 from exchange_scraper import fetch_all_scrapers
+
+# Precompilované regex patterny pro tokeny — sestaví se jednou při startu modulu.
+# CASE-SENSITIVE: tickery jsou vždy UPPERCASE, ale slova jako "token", "not", "cloud"
+# jsou lowercase → re.IGNORECASE by způsobovalo masivní false positives.
+_TOKEN_PATTERNS: dict[str, re.Pattern] = {
+    token: re.compile(rf'\b{re.escape(token)}\b')
+    for token in TOKENS
+}
 
 # ── LOGGING ──────────────────────────────────────────────────────────────────
 
@@ -65,14 +75,7 @@ def contains_keyword(text: str) -> bool:
 
 def token_in_text(text: str) -> list[str]:
     """Vrátí seznam tokenů ze sledovaného seznamu, které se vyskytují v textu."""
-    t = text.upper()
-    found = []
-    for token in TOKENS:
-        # word-boundary check — vyhneme se falešným shodám (např. "CAR" v "CARBON")
-        import re
-        if re.search(rf'\b{re.escape(token)}\b', t):
-            found.append(token)
-    return found
+    return [token for token, pat in _TOKEN_PATTERNS.items() if pat.search(text)]
 
 
 def log_alert(source: str, title: str, url: str, tokens: list[str], reason: str):
@@ -97,6 +100,161 @@ def send_telegram(text: str):
         resp.raise_for_status()
     except Exception as e:
         log.error("Telegram send error: %s", e)
+
+
+_HIGH_REASONS = {
+    "delist", "delisting", "removal", "will be removed", "trading pair removal",
+    "suspend", "suspension", "halt", "trading halt", "discontinu",
+    "wind down", "end of support", "trading stopped",
+}
+_MED_REASONS = {
+    "migration", "migrate", "token swap", "chain migration", "network change",
+    "network upgrade", "hard fork", "rebranding", "rebrand", "sunset", "deprecat",
+}
+
+
+def _priority_icon(reason: str) -> str:
+    r = reason.lower()
+    if any(h in r for h in _HIGH_REASONS):
+        return "🔴"
+    if any(m in r for m in _MED_REASONS):
+        return "🟠"
+    return "🟡"
+
+
+def _priority_order(alert: dict) -> int:
+    r = (alert.get("reason") or "").lower()
+    if any(h in r for h in _HIGH_REASONS):
+        return 0
+    if any(m in r for m in _MED_REASONS):
+        return 1
+    return 2
+
+
+def _send_telegram_summary(all_alerts: list[dict]):
+    """
+    Odešle 1 nebo více souhrnných zpráv (max 4000 znaků každá).
+    Zabrání Telegram flood: místo N+1 zpráv jde vždy jen minimum zpráv.
+    Alertů jsou seřazeny podle závažnosti: 🔴 delist > 🟠 migrace > 🟡 ostatní.
+    """
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if not all_alerts:
+        send_telegram(f"✅ <b>Crypto Monitor — {date_str}</b>\nŽádné nové relevantní zprávy.")
+        return
+
+    # Deduplikace přes uid
+    seen_uids: set[str] = set()
+    unique_alerts = []
+    for a in all_alerts:
+        if a["uid"] not in seen_uids:
+            seen_uids.add(a["uid"])
+            unique_alerts.append(a)
+
+    # Seřadit: nejdříve kritické (delist/suspend), pak migrace, pak ostatní
+    unique_alerts.sort(key=_priority_order)
+
+    tokens_affected = {t for a in unique_alerts for t in (a["tokens"] or ["GENERAL"])}
+    header = (
+        f"🚨 <b>Crypto Monitor — {date_str}</b>\n"
+        f"<b>{len(unique_alerts)}</b> alertů | tokeny: <b>{', '.join(sorted(tokens_affected))}</b>\n"
+    )
+
+    lines: list[str] = []
+    for a in unique_alerts:
+        icon = _priority_icon(a.get("reason", ""))
+        tokens_str = ", ".join(a["tokens"]) if a["tokens"] else "GENERAL"
+        title_short = a["title"][:100].rstrip()
+        line = f"\n{icon} <b>[{tokens_str}]</b> — <i>{a['reason']}</i>\n"
+        line += f"  {title_short}\n"
+        line += f"  🏦 {a['source']}"
+        if a.get("url"):
+            line += f" | <a href=\"{a['url']}\">odkaz</a>"
+        lines.append(line)
+
+    # Rozdělíme na zprávy po max 4000 znacích
+    LIMIT = 4000
+    current = header
+    for line in lines:
+        if len(current) + len(line) + 1 > LIMIT:
+            send_telegram(current)
+            time.sleep(1)
+            current = line + "\n"
+        else:
+            current += line + "\n"
+    if current.strip():
+        send_telegram(current)
+
+
+# ── LINEAR ───────────────────────────────────────────────────────────────────
+
+_LINEAR_URL = "https://api.linear.app/graphql"
+
+_LINEAR_MUTATION = """
+mutation CreateIssue($title: String!, $teamId: String!, $assigneeId: String!,
+                     $description: String, $priority: Int) {
+  issueCreate(input: {
+    title: $title
+    teamId: $teamId
+    assigneeId: $assigneeId
+    description: $description
+    priority: $priority
+  }) {
+    success
+    issue { identifier url }
+  }
+}
+"""
+
+
+def send_linear_issue(all_alerts: list[dict]):
+    """Vytvoří 1 souhrnné Linear issue v Ops teamu, přiřazené zdenalovi."""
+    if not all_alerts:
+        return
+
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Priorita = nejvyšší z alertů (nejnižší číslo = nejvyšší priorita)
+    top_priority = min(_priority_order(a) for a in all_alerts)
+    tokens_all = sorted({t for a in all_alerts for t in (a["tokens"] or ["GENERAL"])})
+    title = f"Crypto Monitor {date_str} — {len(all_alerts)} alertů [{', '.join(tokens_all[:5])}{'...' if len(tokens_all) > 5 else ''}]"
+
+    # Sestav popis: seřazeno podle závažnosti
+    sorted_alerts = sorted(all_alerts, key=_priority_order)
+    desc_lines = [f"## Crypto Monitor — {date_str}\n"]
+    for a in sorted_alerts:
+        icon = _priority_icon(a.get("reason", ""))
+        tokens_str = ", ".join(a["tokens"]) if a["tokens"] else "GENERAL"
+        desc_lines.append(f"{icon} **[{tokens_str}]** {a['reason']} — {a['source']}")
+        desc_lines.append(f"{a['title']}")
+        if a.get("url"):
+            desc_lines.append(f"[Odkaz]({a['url']})")
+        desc_lines.append("")
+
+    try:
+        resp = requests.post(
+            _LINEAR_URL,
+            json={
+                "query": _LINEAR_MUTATION,
+                "variables": {
+                    "title": title,
+                    "teamId": LINEAR_TEAM_ID,
+                    "assigneeId": LINEAR_ASSIGNEE_ID,
+                    "description": "\n".join(desc_lines),
+                    "priority": top_priority,
+                },
+            },
+            headers={"Authorization": LINEAR_API_KEY, "Content-Type": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        issue = data.get("data", {}).get("issueCreate", {}).get("issue", {})
+        if issue:
+            log.info("Linear issue: %s %s", issue.get("identifier"), issue.get("url"))
+        else:
+            log.error("Linear issue create failed: %s", data.get("errors"))
+    except Exception as e:
+        log.error("Linear API error: %s", e)
 
 
 # ── CRYPTOPANIC ───────────────────────────────────────────────────────────────
@@ -451,43 +609,39 @@ def main():
     else:
         log.info("CoinMarketCap přeskočen (API key není nastaven)")
 
-    # Logovat každý alert individuálně + poslat na Telegram
+    # Deduplikace cross-source: stejný článek z RSS i JSON API scraperu má jiné URL
+    # ale stejný titulek → normalizujeme titulek a zachováme jen první výskyt.
+    seen_titles: set[str] = set()
+    deduped: list[dict] = []
+    for a in all_alerts:
+        key = re.sub(r'\s+', ' ', a["title"].strip().lower())
+        if key not in seen_titles:
+            seen_titles.add(key)
+            deduped.append(a)
+    if len(deduped) < len(all_alerts):
+        log.info("Cross-source dedup: %d → %d alertů", len(all_alerts), len(deduped))
+    all_alerts = deduped
+
+    # Logovat každý alert do souboru
     for a in all_alerts:
         log_alert(a["source"], a["title"], a["url"], a["tokens"], a["reason"])
-        tokens_str = ", ".join(a["tokens"]) if a["tokens"] else "GENERAL"
-        msg = (
-            f"🚨 <b>CRYPTO ALERT</b>\n"
-            f"📌 <b>Token:</b> {tokens_str}\n"
-            f"🏦 <b>Zdroj:</b> {a['source']}\n"
-            f"⚠️ <b>Důvod:</b> {a['reason']}\n"
-            f"📰 {a['title']}\n"
-            f"🔗 <a href=\"{a['url']}\">Číst více</a>"
-        )
-        send_telegram(msg)
 
-    # Denní souhrn
+    # Denní souhrn do logu
     log_summary(all_alerts)
 
-    if all_alerts:
-        summary_lines = [f"📋 <b>Denní souhrn — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}</b>"]
-        summary_lines.append(f"Celkem {len(all_alerts)} alertů:\n")
-        by_token: dict[str, list] = {}
-        for a in all_alerts:
-            for t in (a["tokens"] or ["GENERAL"]):
-                by_token.setdefault(t, []).append(a)
-        for token, items in sorted(by_token.items()):
-            summary_lines.append(f"<b>[{token}]</b>")
-            for item in items:
-                summary_lines.append(f"  • [{item['source']}] {item['title'][:80]}")
-        send_telegram("\n".join(summary_lines))
-    else:
-        send_telegram(f"✅ <b>Denní souhrn {datetime.now(timezone.utc).strftime('%Y-%m-%d')}</b>\nŽádné nové relevantní zprávy.")
+    # Telegram: 1 souhrnná zpráva (nebo série zpráv po max 4000 znacích)
+    _send_telegram_summary(all_alerts)
 
-    # Uložit stav
+    # Linear: 1 souhrnné issue za run (Ops team, assignee: zdenal)
+    if LINEAR_API_KEY:
+        send_linear_issue(all_alerts)
+    else:
+        log.info("Linear přeskočen (LINEAR_API_KEY není nastaven)")
+
+    # Uložit stav — seřadíme pro deterministické oříznutí na 5000 posledních
     new_ids = [a["uid"] for a in all_alerts]
-    # Limit na posledních 5000 ID abychom nepřetékali
-    updated_ids = list(seen_ids | set(new_ids))[-5000:]
-    state["seen_ids"]  = updated_ids
+    all_ids = sorted(seen_ids | set(new_ids))
+    state["seen_ids"]  = all_ids[-5000:]
     state["last_run"]  = datetime.now(timezone.utc).isoformat()
     save_state(state)
 

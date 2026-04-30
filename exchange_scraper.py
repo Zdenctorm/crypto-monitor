@@ -475,6 +475,61 @@ def scrape_coinbase() -> list[dict]:
     return []
 
 
+def scrape_mexc() -> list[dict]:
+    """
+    MEXC support centrum — Zendesk JSON API.
+    Pokrývá delistingy a oznámení pro MEXC Global.
+    Fallback: MEXC blog RSS.
+    """
+    for url, params in [
+        (
+            "https://support.mexc.com/api/v2/help_center/en-us/articles.json",
+            {"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+        (
+            "https://support.mexc.com/api/v2/help_center/en-us/articles.json",
+            {"label_names": "announcements", "sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+        ),
+    ]:
+        resp = _get(url, use_json=True, params=params)
+        if not resp:
+            continue
+        try:
+            articles = resp.json().get("articles", [])
+            if not articles:
+                continue
+            return [
+                {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "MEXC"}
+                for a in articles if a.get("title")
+            ]
+        except Exception as e:
+            log.error("MEXC Zendesk parse error: %s", e)
+
+    # Fallback: MEXC blog přes web API
+    resp = _get(
+        "https://www.mexc.com/api/platform/notice/list",
+        use_json=True,
+        params={"pageNum": 1, "pageSize": 20, "lang": "en_US"},
+    )
+    if resp:
+        try:
+            data = resp.json()
+            items = data.get("data", {}).get("resultList", [])
+            results = []
+            for item in items:
+                title = item.get("title", "").strip()
+                notice_id = item.get("id", "")
+                url = f"https://www.mexc.com/support/articles/{notice_id}" if notice_id else "https://www.mexc.com/support"
+                if title:
+                    results.append({"title": title, "url": url, "source": "MEXC"})
+            if results:
+                return results
+        except Exception as e:
+            log.warning("MEXC web API parse error: %s", e)
+
+    return []
+
+
 def scrape_coinbase_help() -> list[dict]:
     """
     Coinbase Help Center — Zendesk JSON API.
@@ -537,8 +592,9 @@ def _scrape_telegram_channel(channel: str, source: str) -> list[dict]:
             if not text_el:
                 continue
             title = text_el.get_text(" ", strip=True)
-            # Zkrátíme na 300 znaků — zbytek je kontext který nepotřebujeme
-            title = title[:300].strip()
+            # Zkrátíme na 200 znaků — delší texty jsou reklamy/DCA funkce a
+            # obsahovaly by falešné ticker shody (např. "SOL" v seznamu coinů)
+            title = title[:200].strip()
             msg_url = link_el["href"] if link_el and link_el.get("href") else f"https://t.me/{channel}"
             if title and len(title) >= 10:
                 results.append({"title": title, "url": msg_url, "source": source})
@@ -594,6 +650,7 @@ _SCRAPERS = [
     scrape_cryptocom,
     scrape_okx,
     scrape_gate,
+    scrape_mexc,
     # Coinbase — blog RSS + help center Zendesk API
     scrape_coinbase,
     scrape_coinbase_help,
