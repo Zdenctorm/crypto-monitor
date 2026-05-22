@@ -7,7 +7,7 @@ on:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -21,7 +21,7 @@ jobs:
           python-version: "3.11"
 
       - name: Instaluj závislosti
-        run: pip install requests feedparser beautifulsoup4 "curl_cffi>=0.7"
+        run: pip3 install requests feedparser beautifulsoup4 "curl_cffi>=0.7"
 
       - name: Obnov stav monitoru z cache
         uses: actions/cache/restore@v4
@@ -36,7 +36,7 @@ jobs:
         env:
           CRYPTOPANIC_API_KEY:   ${{ secrets.CRYPTOPANIC_API_KEY }}
           COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
-        run: python health_check.py
+        run: python3 health_check.py
 
       - name: Spusť monitor
         env:
@@ -45,7 +45,7 @@ jobs:
           TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
           COINMARKETCAP_API_KEY: ${{ secrets.COINMARKETCAP_API_KEY }}
           LINEAR_API_KEY:        ${{ secrets.LINEAR_API_KEY }}
-        run: python crypto_monitor.py
+        run: python3 crypto_monitor.py
 
       - name: Ulož stav monitoru do cache
         if: always()
