@@ -157,31 +157,89 @@ def scrape_bybit() -> list[dict]:
 
 def scrape_kraken() -> list[dict]:
     """
-    Zendesk JSON API — Kraken Support.
-    Sekce 200187503 = Announcements (delistingy, migrace).
+    Kraken Support — Zendesk JSON API + search + Atom RSS.
+    Pokusí se o více endpointů v pořadí od nejspecifičtějšího.
     """
+    # Pokus 1: sekce 200187503 = Announcements
     resp = _get(
         "https://support.kraken.com/api/v2/help_center/en-us/sections/200187503/articles.json",
         use_json=True,
         params={"sort_by": "created_at", "sort_order": "desc", "per_page": 20},
     )
-    if not resp:
-        resp = _get(
-            "https://support.kraken.com/api/v2/help_center/en-us/articles.json",
-            use_json=True,
-            params={"label_names": "announcements", "sort_by": "created_at", "sort_order": "desc", "per_page": 20},
-        )
-    if not resp:
-        return []
-    try:
-        articles = resp.json().get("articles", [])
-        return [
-            {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "KrakenSupport"}
-            for a in articles if a.get("title")
-        ]
-    except Exception as e:
-        log.error("Kraken Zendesk parse error: %s", e)
-        return []
+    if resp:
+        try:
+            articles = resp.json().get("articles", [])
+            if articles:
+                return [
+                    {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "KrakenSupport"}
+                    for a in articles if a.get("title")
+                ]
+        except Exception as e:
+            log.error("Kraken section parse error: %s", e)
+
+    # Pokus 2: fulltextové hledání delistingů
+    resp = _get(
+        "https://support.kraken.com/api/v2/help_center/en-us/articles/search.json",
+        use_json=True,
+        params={"query": "scheduled delist removal", "per_page": 15},
+    )
+    if resp:
+        try:
+            results = resp.json().get("results", [])
+            if results:
+                return [
+                    {"title": r.get("title", "").strip(), "url": r.get("html_url", ""), "source": "KrakenSupport"}
+                    for r in results if r.get("title")
+                ]
+        except Exception as e:
+            log.error("Kraken search parse error: %s", e)
+
+    # Pokus 3: obecné articles s labelami
+    resp = _get(
+        "https://support.kraken.com/api/v2/help_center/en-us/articles.json",
+        use_json=True,
+        params={"label_names": "announcements", "sort_by": "created_at", "sort_order": "desc", "per_page": 20},
+    )
+    if resp:
+        try:
+            articles = resp.json().get("articles", [])
+            if articles:
+                return [
+                    {"title": a.get("title", "").strip(), "url": a.get("html_url", ""), "source": "KrakenSupport"}
+                    for a in articles if a.get("title")
+                ]
+        except Exception as e:
+            log.error("Kraken articles parse error: %s", e)
+
+    # Pokus 4: Atom RSS feed sekce Announcements
+    for atom_url in [
+        "https://support.kraken.com/hc/en-us/sections/200187503.atom",
+        "https://support.kraken.com/hc/en-us/articles.atom",
+    ]:
+        resp = _get(atom_url)
+        if not resp:
+            continue
+        try:
+            root = ET.fromstring(resp.text)
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            entries = root.findall("atom:entry", ns)
+            results = []
+            for entry in entries[:20]:
+                title_el = entry.find("atom:title", ns)
+                link_el = entry.find("atom:link", ns)
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                url = link_el.get("href", "") if link_el is not None else ""
+                if title:
+                    results.append({"title": title, "url": url, "source": "KrakenSupport"})
+            if results:
+                log.info("Kraken Atom RSS (%s) → %d článků", atom_url, len(results))
+                return results
+        except ET.ParseError as e:
+            log.warning("Kraken Atom parse error (%s): %s", atom_url, e)
+        except Exception as e:
+            log.warning("Kraken Atom error (%s): %s", atom_url, e)
+
+    return []
 
 
 # ─── KUCOIN ───────────────────────────────────────────────────────────────────
@@ -670,13 +728,28 @@ def fetch_all_scrapers() -> list[dict]:
     Chyby jednoho scraperu nezastaví ostatní.
     """
     all_items = []
+    ok_count = 0
+    fail_count = 0
     for scraper in _SCRAPERS:
         name = scraper.__name__
         try:
             items = scraper()
-            log.info("Scraper %-25s → %d článků", name, len(items))
+            if items:
+                log.info("Scraper %-25s → %d článků", name, len(items))
+                ok_count += 1
+            else:
+                log.warning("Scraper %-25s → 0 článků (blokování nebo žádné zprávy)", name)
+                fail_count += 1
             all_items.extend(items)
         except Exception as e:
             log.error("Scraper %s selhal neočekávaně: %s", name, e)
+            fail_count += 1
         time.sleep(0.3)
+
+    if ok_count == 0 and fail_count > 0:
+        log.warning(
+            "⚠ VŠECHNY scrapery vrátily 0 výsledků (%d scraperů) — "
+            "pravděpodobné blokování IP z CI prostředí nebo výpadek API",
+            fail_count,
+        )
     return all_items

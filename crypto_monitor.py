@@ -140,7 +140,6 @@ def _send_telegram_summary(all_alerts: list[dict]):
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if not all_alerts:
-        send_telegram(f"✅ <b>Crypto Monitor — {date_str}</b>\nŽádné nové relevantní zprávy.")
         return
 
     # Deduplikace přes uid
