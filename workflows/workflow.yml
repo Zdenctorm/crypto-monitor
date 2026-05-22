@@ -19,7 +19,7 @@ jobs:
           python-version: "3.11"
 
       - name: Instaluj závislosti
-        run: pip install requests feedparser beautifulsoup4
+        run: pip install requests feedparser beautifulsoup4 "curl_cffi>=0.7"
 
       - name: Spusť monitor
         env:

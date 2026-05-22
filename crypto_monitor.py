@@ -73,6 +73,20 @@ def contains_keyword(text: str) -> bool:
     return any(kw in t for kw in KEYWORDS)
 
 
+# Klíčová slova u kterých delist/suspend je tak závažný, že artikel z burzy
+# pustíme dál i když titulek neobsahuje konkrétní ticker (tokeny jsou v těle).
+_HIGH_PRIORITY_KW = {
+    "delist", "delisting", "removal", "will be removed", "trading pair removal",
+    "suspend", "suspension", "halt", "trading halt", "discontinu",
+    "wind down", "end of support", "trading stopped",
+}
+
+
+def is_high_priority_keyword(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in _HIGH_PRIORITY_KW)
+
+
 def token_in_text(text: str) -> list[str]:
     """Vrátí seznam tokenů ze sledovaného seznamu, které se vyskytují v textu."""
     return [token for token, pat in _TOKEN_PATTERNS.items() if pat.search(text)]
@@ -352,8 +366,9 @@ def fetch_exchange_feeds(seen_ids: set) -> list[dict]:
 
             tokens_found = token_in_text(full)
 
-            # Přeskočíme články bez konkrétního tokenu ze sledovaného seznamu
-            if not tokens_found:
+            # Obecné delist/suspend titulky (tokeny jsou v těle článku, ne v titulku)
+            # pustíme dál jako GENERAL — příklad: "Notice of Scheduled Delistings - May 2026"
+            if not tokens_found and not is_high_priority_keyword(full):
                 continue
 
             alerts.append({
@@ -391,7 +406,9 @@ def fetch_exchange_scrapers(seen_ids: set) -> list[dict]:
             continue
 
         tokens_found = token_in_text(full)
-        if not tokens_found:
+
+        # Obecné delist/suspend titulky bez konkrétního tickeru — pustit jako GENERAL
+        if not tokens_found and not is_high_priority_keyword(full):
             continue
 
         alerts.append({

@@ -25,9 +25,24 @@ import xml.etree.ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
 
+# curl_cffi impersonuje Chrome TLS fingerprint → obchází Cloudflare bot detection.
+# Pokud není nainstalován, padne na standardní requests (může být blokován).
+try:
+    from curl_cffi import requests as _cffi
+    _CFFI_OK = True
+except ImportError:
+    _cffi = None
+    _CFFI_OK = False
+
 log = logging.getLogger(__name__)
 
+if _CFFI_OK:
+    log.info("curl_cffi dostupný — Chrome TLS fingerprint aktivní")
+else:
+    log.warning("curl_cffi NENÍ dostupný — exchange scrapery mohou být blokovány (403)")
+
 TIMEOUT = 15
+_IMPERSONATE = "chrome120"
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -52,7 +67,11 @@ _HTML_HEADERS = {
 def _get(url: str, *, use_json: bool = False, params: dict = None) -> requests.Response | None:
     headers = _JSON_HEADERS if use_json else _HTML_HEADERS
     try:
-        resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+        if _CFFI_OK:
+            resp = _cffi.get(url, headers=headers, params=params,
+                             timeout=TIMEOUT, impersonate=_IMPERSONATE)
+        else:
+            resp = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
         resp.raise_for_status()
         return resp
     except Exception as e:
@@ -62,7 +81,11 @@ def _get(url: str, *, use_json: bool = False, params: dict = None) -> requests.R
 
 def _post(url: str, body: dict) -> requests.Response | None:
     try:
-        resp = requests.post(url, json=body, headers=_JSON_HEADERS, timeout=TIMEOUT)
+        if _CFFI_OK:
+            resp = _cffi.post(url, json=body, headers=_JSON_HEADERS,
+                              timeout=TIMEOUT, impersonate=_IMPERSONATE)
+        else:
+            resp = requests.post(url, json=body, headers=_JSON_HEADERS, timeout=TIMEOUT)
         resp.raise_for_status()
         return resp
     except Exception as e:
